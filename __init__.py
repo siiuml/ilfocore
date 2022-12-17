@@ -7,13 +7,13 @@
 ilfocore
 ===============
 
-The core of ilafalseone, can be as a independent moudle
+The core of ilafalseone.
 """
 
 __author__ = 'SiumLhahah'
 __all__ = [
+    'ilfonode',
     'lib',
-    'contact',
-    'node'
+    'udpnode'
 ]
-__version__ = '0.0.1'
+__version__ = '0.0.2'
