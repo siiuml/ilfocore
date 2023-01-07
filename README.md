@@ -3,12 +3,13 @@
 The ilfocore package
 ===================
 
+```
 Language: Python (>= 3.11)
+```
 
-The ilfocore package is a basic transmission moudle providing stable and
-authentic transmission support for the ilafalseone package, a instant
-messenger package in development. The ilafalseone package will be completed in
-a few weeks.
+The ilfocore package provides basic, stable and authentic transmission support
+for the ilafalseone package, a instant messenger package in development. The
+ilafalseone package will be completed in a few weeks.
 
 Required site-package:
 [cryptography](https://github.com/pyca/cryptography)
