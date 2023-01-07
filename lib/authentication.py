@@ -1,8 +1,5 @@
-#!/usr/bin/python
-
 """"
 ilfocore.lib.authentication
-===============
 
 Provides message authentication support for ilfocore.
 

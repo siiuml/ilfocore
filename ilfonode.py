@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # Copyright (c) 2022 SiumLhahah
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -6,11 +5,9 @@
 """
 ilfocore.ilfonode
 
-Safe node of ilfocore, providing authentic transmission.
+Safe node of ilfocore, providing authentic transmission support.
 
 """
-
-__author__ = 'SiumLhahah'
 
 from collections import defaultdict, deque
 from typing import Iterable
@@ -46,10 +43,6 @@ class BaseSession(udpnode.BaseSession):
     - process_capture(req_type: bytes, buf: io.BytesIO)
     - process_request(req_type: bytes, buf: io.BytesIO)
 
-    Class variables:
-    - _handlers : collections.deque[typing.Callable]
-        A deque of handle methods
-
     Instance variables:
 
     - sig_key : signature.PrivateKey
@@ -65,6 +58,10 @@ class BaseSession(udpnode.BaseSession):
         self.sig_key: signature.PublicKey = None
         self.pub_key: bytes = None
         super().__init__(conn)
+        self.handle = self.handle_next
+        self._handlers = deque([self.handle_sig_alg,
+                                self.handle_sig_key,
+                                self.handle_sig])
 
     def setup(self):
         """Setup to send signature.
@@ -78,13 +75,6 @@ class BaseSession(udpnode.BaseSession):
                             sig_key.public_key.to_bytes(),
                             sig_key.sign(self.recv_conn_id + send_key)))
         super().setup()
-
-    def handle_next(self, data: bytes):
-        """Handle package by next handler."""
-        handler = self._handlers.popleft()
-        handler(self, data)
-
-    handle = handle_next
 
     def handle_sig_alg(self, alg: bytes):
         """Handle signature algorithm."""
@@ -129,10 +119,6 @@ class BaseSession(udpnode.BaseSession):
 
         """
 
-    _handlers = deque([handle_sig_alg,
-                       handle_sig_key,
-                       handle_sig])
-
     def close(self):
         """Close session, interrupt thread if multi-threaded."""
         if self.pub_key in self.node.session_groups:
@@ -163,6 +149,8 @@ class Node(udpnode.Node):
     See udpnode.Node.__doc__ for more information.
 
     """
+
+    version = b'node2ilfo'
 
     def __init__(
         self,

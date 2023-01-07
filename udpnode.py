@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # Copyright (c) 2022 SiumLhahah
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
@@ -10,8 +9,6 @@ Node based on UDP.
 
 """
 
-__author__ = 'SiumLhahah'
-
 from abc import ABCMeta, abstractmethod
 from collections import deque, namedtuple
 from enum import Enum
@@ -22,7 +19,7 @@ from secrets import randbelow, token_bytes
 from socketserver import UDPServer
 from threading import Lock, Thread
 from time import monotonic as time
-from typing import Callable, Iterable, Self
+from typing import Iterable, Self
 from .lib import asymmetric, authentication, cipher, kdf
 
 # Constants for the protocol
@@ -92,7 +89,7 @@ class Connection(metaclass=ABCMeta):
     - process_noblock(request: bytes)
     - retransmit()
     - send(package: bytes)
-    - send_packages(packages: Iterable[bytes])
+    - send_packages(packages: typing.Iterable[bytes])
 
     Methods that may be overridden:
 
@@ -119,6 +116,7 @@ class Connection(metaclass=ABCMeta):
     - self._send_buf_lock : threading.Lock
     - self.deadline : Real
     - self._retries : int
+    - self._handlers : deque[typing.Callable[[bytes], None]]
 
     - self.version: bytes
     - self.max_packet_size : int
@@ -177,6 +175,11 @@ class Connection(metaclass=ABCMeta):
         Overriden by ClientClass, ServerClass and SessionClass.
 
         """
+
+    def handle_next(self, data: bytes):
+        """Handle package by next handler."""
+        handler = self._handlers.popleft()
+        handler(data)
 
     def finish(self):
         """Finish the connection completely, called by close().
@@ -518,6 +521,8 @@ class HalfConnection(Connection):
         self.cipher_key = cipher.NoCipher.generate()
         self._alg_buf: deque[str] = deque()
 
+        self.handle = self.handle_next
+
     @property
     def recv_seq(self) -> int:
         """Sequence number received."""
@@ -533,24 +538,14 @@ class HalfConnection(Connection):
         """Sequence number sent."""
         return self._send_seq
 
-    @property
-    @abstractmethod
-    def _handlers(self) -> deque[Callable[[bytes], None]]:
-        """Package handler buffer."""
-
     def check_version(self):
         """Check protocol version of client.
 
         Raise ValueError to close the connection.
 
         """
-        if self.version != self.node.version:
+        if not self.version.startswith(self.node.version):
             raise ValueError("Protocol version not supported")
-
-    def handle(self, data: bytes):
-        """Handle package."""
-        handler = self._handlers.popleft()
-        handler(self, data)
 
     def handle_alg(self, data: bytes):
         """Handle algorithm package."""
@@ -627,6 +622,10 @@ class ConnectionToClient(HalfConnection):
 
         self.conn_id_size = 0
         self.send_conn_id = b''
+        self._handlers = deque([self.handle_alg,
+                                self.handle_asym,
+                                self.handle_alg,
+                                self.handle_mac])
 
     def process_noblock(self, request):
         """Called by the node.
@@ -786,11 +785,6 @@ class ConnectionToClient(HalfConnection):
         self.finish = lambda: None
         self.close()
 
-    _handlers = deque([HalfConnection.handle_alg,
-                      handle_asym,
-                      HalfConnection.handle_alg,
-                      handle_mac])
-
     def close(self):
         """Close the connection."""
         self.node.group_lock.acquire()
@@ -815,6 +809,9 @@ class ConnectionToServer(HalfConnection):
                              self.random_bytes(self.conn_id_size - 1))
 
         self._temp_key = None
+        self._handlers = deque([self.handle_alg,
+                                self.handle_alg,
+                                self.handle_asym])
 
     def start(self):
         """Send SYN message at first to start the connection.
@@ -994,10 +991,6 @@ class ConnectionToServer(HalfConnection):
             self.finish = lambda: None
             self.close()
 
-    _handlers = deque([HalfConnection.handle_alg,
-                      HalfConnection.handle_alg,
-                      handle_asym])
-
     def close(self):
         """Close the connection."""
         self.node.group_lock.acquire()
@@ -1017,6 +1010,8 @@ class BaseSession(Connection):
     - from_connection(conn: HalfConnection)
     - process_noblock(request: bytes)
     - start()
+    - finish()
+    - finish_thread()
     - close()
     - send(package: bytes)
     - send_packages(packages: typing.Iterable[bytes])
@@ -1062,6 +1057,8 @@ class BaseSession(Connection):
         Maximum available size for a node packet to send.
     - seq_size : int
         Byte length of sequence numbers receving.
+    - self._handlers : deque[typing.Callable[[bytes], None]]
+        Package handler buffer.
 
     - asym_keys : tuple[asymmetric.AsymmetricSecret, bytes, bytes]
         Secret key, public key sent and public key received.
@@ -1226,7 +1223,7 @@ class Node(UDPServer):
 
     """
     # Infomation in connection
-    version = b'nodeilfo2'  # version of protocol, for others to identify it
+    version = b'node2'  # version of protocol, for others to identify it
     max_packet_size = 512
     # Classes
     ClientClass = ConnectionToClient
@@ -1390,11 +1387,11 @@ class Node(UDPServer):
         for group in (self.sessions, self.servers, self.clients):
             for con in group.values():
                 con.finish()
+                con.finish_thread()
         if self.has_queue_as_client:
             self.client_request_queue.put(None)
         if self.has_queue_as_server:
             self.server_request_queue.put(None)
-
         if hasattr(self, 'threads'):
             for thread in self.threads:
                 thread.join()
