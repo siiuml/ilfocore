@@ -11,7 +11,6 @@ Node based on UDP.
 
 from abc import ABCMeta, abstractmethod
 from collections import deque, namedtuple
-from enum import Enum
 from hmac import compare_digest
 from io import BytesIO
 from queue import Queue
@@ -20,52 +19,17 @@ from socketserver import UDPServer
 from threading import Lock, Thread
 from time import monotonic as time
 from typing import Iterable, Self
+from .constants import (
+    ALG_SIZE_LEN,
+    BYTEORDER,
+    ENCODING,
+    PACKET_SIZE_LEN,
+    TYPE_SIZE,
+    Address,
+    Real,
+    ReqType
+)
 from .lib import asymmetric, authentication, cipher, kdf
-
-# Constants for the protocol
-
-# Request type size
-TYPE_SIZE = 1
-
-# The size of a 1-byte integer
-# which determines the size of
-# a algorithm name that not
-# greater than 255
-ALG_SIZE_LEN = 1
-
-# The size of a 2-byte integer
-# which determines the size of
-# the maximum node packet size
-# that not greater than 65535
-PACKET_SIZE_LEN = 2
-
-# Encoding and byteorder
-ENCODING = 'utf-8'
-BYTEORDER = 'big'
-
-
-# Types
-Address = tuple[str, int]
-Real = int | float
-
-Packet = namedtuple('Packet', ['seq', 'data'])
-Packet.__doc__ = """Datagram packet with its sequence number.
-
-seq : bytes
-data : bytes
-
-"""
-
-
-class ReqType(bytes, Enum):
-
-    """Request types."""
-
-    EOT = b'\x04'
-    ENQ = b'\x05'
-    ACK = b'\x06'
-    NAK = b'\x15'
-    SYN = b'\x16'
 
 
 def processing_thread(queue: Queue):
@@ -77,6 +41,15 @@ def processing_thread(queue: Queue):
     while (request := queue.get()) is not None:
         request, con = request
         con.process(request)
+
+
+Packet = namedtuple('Packet', ['seq', 'data'])
+Packet.__doc__ = """Datagram packet with its sequence number.
+
+seq : bytes
+data : bytes
+
+"""
 
 
 class Connection(metaclass=ABCMeta):
@@ -162,10 +135,28 @@ class Connection(metaclass=ABCMeta):
         # Lock
         self._send_buf_lock = Lock()
 
-    def start(self):
-        """Start the connection thread.
+        # Multi-threading
+        if self.multithreaded:
+            self._queue: Queue[bytes | None] = Queue()
+            self.thread = Thread(target=processing_thread,
+                                 args=(self._queue,))
 
-        Overriden by BaseSessionClass.
+    def start(self):
+        """Start the connection thread after instance initialized.
+
+        May be overriden for single-threading.
+
+        """
+        if self.multithreaded:
+            self.thread.start()
+
+        # Call to setup
+        self.setup()
+
+    def setup(self):
+        """Setup, called by start().
+
+        May be overriden.
 
         """
 
@@ -195,9 +186,11 @@ class Connection(metaclass=ABCMeta):
     def finish_thread(self):
         """Finish the connection thread, called by close().
 
-        Overriden by BaseSessionClass.
+        May be overriden.
 
         """
+        if self.multithreaded:
+            self._queue.put_nowait(None)
 
     def close(self):
         """Close the connection.
@@ -205,7 +198,7 @@ class Connection(metaclass=ABCMeta):
         and pop self from dicts of node.
 
         Overriden by ClientClass, ServerClass and BaseSessionClass.
-        No lock before being overriden.
+        Lock acquiring or releasing will be in the overriden close().
 
         """
         if self in self.node.retrans_cons:
@@ -813,7 +806,7 @@ class ConnectionToServer(HalfConnection):
                                 self.handle_alg,
                                 self.handle_asym])
 
-    def start(self):
+    def setup(self):
         """Send SYN message at first to start the connection.
 
         datagram_packet == (
@@ -1099,34 +1092,11 @@ class BaseSession(Connection):
         self.cipher_key = conn.cipher_key
         self.digest_key = conn.digest_key
         self.mac_key = conn.mac_key
-        # Multi-threading
-        if self.multithreaded:
-            self._queue: Queue[bytes | None] = Queue()
 
     @classmethod
     def from_connection(cls, conn: HalfConnection) -> Self:
         """Establish a session from a connection."""
         return cls(conn)
-
-    def start(self):
-        """Start the session thread.
-
-        May be overriden for single-threading.
-
-        """
-        if self.multithreaded:
-            thread = Thread(target=processing_thread, args=(self._queue,))
-            self.node.threads.append(thread)
-            thread.start()
-
-        self.setup()
-
-    def setup(self):
-        """Setup, called by start().
-
-        May be overriden.
-
-        """
 
     def process_noblock(self, request):
         """Called by the node. Put request into queue for another thread.
@@ -1139,15 +1109,6 @@ class BaseSession(Connection):
 
         """
         self._queue.put_nowait((request, self))
-
-    def finish_thread(self):
-        """Finish the session thread, called by close().
-
-        May be overriden.
-
-        """
-        if self.multithreaded:
-            self._queue.put_nowait(None)
 
     def close(self):
         """Close session, interrupt thread if multi-threaded."""
@@ -1229,8 +1190,8 @@ class Node(UDPServer):
     ClientClass = ConnectionToClient
     ServerClass = ConnectionToServer
     # Multi-threading
-    has_queue_as_client = True
-    has_queue_as_server = True
+    has_queue_to_server = True
+    has_queue_to_client = True
     # Keepalive
     keepalive_interval: Real = 30
     keepalive_timeout: Real = 300
@@ -1264,44 +1225,28 @@ class Node(UDPServer):
 
         # Multi-thread
         # As client
-        if self.has_queue_as_client:
+        if self.has_queue_to_server:
             self.server_request_queue: Queue[
                 tuple[bytes, ConnectionToServer] | None
             ] = Queue()
+            self.server_request_thread = Thread(
+                target=processing_thread, args=(self.server_request_queue,))
         # As server
-        if self.has_queue_as_server:
+        if self.has_queue_to_client:
             self.client_request_queue: Queue[
                 tuple[bytes, ConnectionToClient] | None
             ] = Queue()
-        if (self.has_queue_as_client or self.has_queue_as_server
-                or SessionClass.multithreaded):
-            self.threads: list[Thread] = []
+            self.client_request_thread = Thread(
+                target=processing_thread, args=(self.client_request_queue,))
 
         super().__init__(server_address, SessionClass, bind_and_activate)
 
-    def serve_forever(self, poll_interval=0.5):
-        """Handle one request at a time until shutdown.
-
-        Start a thread to process requests from servers,
-        and a thread to process requests from clients.
-
-        May be overriden to prepare for concurrently processing requests
-        from servers and clients by other mechanisms such as forking.
-
-        """
-        # Start threads
-        if self.has_queue_as_client:
-            thread = Thread(target=processing_thread,
-                            args=(self.server_request_queue,))
-            self.threads.append(thread)
-            thread.start()
-        if self.has_queue_as_server:
-            thread = Thread(target=processing_thread,
-                            args=(self.client_request_queue,))
-            self.threads.append(thread)
-            thread.start()
-
-        super().serve_forever(poll_interval)
+    def server_activate(self):
+        """Start the threads."""
+        if self.has_queue_to_server:
+            self.server_request_thread.start()
+        if self.has_queue_to_client:
+            self.client_request_thread.start()
 
     def service_actions(self):
         """Keepalive and retransmission."""
@@ -1384,17 +1329,21 @@ class Node(UDPServer):
 
     def server_close(self):
         """Called to clean up the node."""
-        for group in (self.sessions, self.servers, self.clients):
-            for con in group.values():
-                con.finish()
-                con.finish_thread()
-        if self.has_queue_as_client:
+        if self.has_queue_to_client:
             self.client_request_queue.put(None)
-        if self.has_queue_as_server:
+            self.client_request_thread.join()
+        if self.has_queue_to_server:
             self.server_request_queue.put(None)
-        if hasattr(self, 'threads'):
-            for thread in self.threads:
-                thread.join()
+            self.server_request_thread.join()
+
+        for cls, group in ((self.SessionClass, self.sessions),
+                           (self.ServerClass, self.servers),
+                           (self.ClientClass, self.clients)):
+            if cls.multithreaded:
+                for con in group.values():
+                    con.finish()
+                    con.finish_thread()
+                    con.thread.join()
 
     def handle_request(self, *args):
         """Use module self.SessionClass.handle instead."""
