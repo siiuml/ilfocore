@@ -36,7 +36,7 @@ class BaseSession(udpnode.BaseSession):
     # if not multi-threaded for sessions
     - start()
     - process_noblock(request)
-    - finish_thread()
+    - stop()
 
     - send_nak()
     - close()

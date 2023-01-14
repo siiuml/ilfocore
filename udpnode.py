@@ -183,8 +183,8 @@ class Connection(metaclass=ABCMeta):
         data = data + self.mac_key.digest(data)
         self.node.socket.sendto(data, self.address)
 
-    def finish_thread(self):
-        """Finish the connection thread, called by close().
+    def stop(self):
+        """Stop the connection thread, called by close().
 
         May be overriden.
 
@@ -194,7 +194,7 @@ class Connection(metaclass=ABCMeta):
 
     def close(self):
         """Close the connection.
-        Call finish() and finish_thread()
+        Call finish() and stop()
         and pop self from dicts of node.
 
         Overriden by ClientClass, ServerClass and BaseSessionClass.
@@ -205,7 +205,7 @@ class Connection(metaclass=ABCMeta):
             self.node.retrans_cons.remove(self)
         self.finish()
         self._recv_buf.close()
-        self.finish_thread()
+        self.stop()
 
     def parse(self, buf: BytesIO) -> bytes | None:
         """Parse node packages which may be like these:
@@ -1004,7 +1004,7 @@ class BaseSession(Connection):
     - process_noblock(request: bytes)
     - start()
     - finish()
-    - finish_thread()
+    - stop()
     - close()
     - send(package: bytes)
     - send_packages(packages: typing.Iterable[bytes])
@@ -1020,7 +1020,7 @@ class BaseSession(Connection):
     # if not multi-threaded for sessions
     - start()
     - process_noblock(request)
-    - finish_thread()
+    - stop()
 
     - send_nak()
     - close()
@@ -1342,7 +1342,7 @@ class Node(UDPServer):
             if cls.multithreaded:
                 for con in group.values():
                     con.finish()
-                    con.finish_thread()
+                    con.stop()
                     con.thread.join()
 
     def handle_request(self, *args):
