@@ -38,8 +38,8 @@ def processing_thread(queue: Queue):
     Put None into the queue to cancel the thread.
 
     """
-    while (request := queue.get()) is not None:
-        request, con = request
+    while (item := queue.get()) is not None:
+        con, request = item
         con.process(request)
 
 
@@ -628,7 +628,7 @@ class ConnectionToClient(HalfConnection):
         to process it in another thread.
 
         """
-        self.node.client_request_queue.put_nowait((request, self))
+        self.node.client_request_queue.put_nowait((self, request))
 
     def process_syn(self, request: bytes):
         """Process SYN message.
@@ -857,7 +857,7 @@ class ConnectionToServer(HalfConnection):
         to process it in another thread.
 
         """
-        self.node.server_request_queue.put_nowait((request, self))
+        self.node.server_request_queue.put_nowait((self, request))
 
     def process_ack(self, request: bytes):
         """Process ACK message.
@@ -1108,7 +1108,7 @@ class BaseSession(Connection):
             self.process(request)
 
         """
-        self._queue.put_nowait((request, self))
+        self._queue.put_nowait((self, request))
 
     def close(self):
         """Close session, interrupt thread if multi-threaded."""

@@ -153,21 +153,29 @@ class Ed25519PublicKey(PublicKey):
 
     name = 'ed25519'
 
+    def __init__(self, key, pub_bytes=None):
+        super().__init__(key)
+        if pub_bytes is None:
+            self._pub_bytes = self._key.public_bytes(
+                Encoding.Raw,
+                PublicFormat.Raw
+            )
+        else:
+            self._pub_bytes = pub_bytes
+
     def verify(self, signature: bytes, data: bytes):
         """Verify the signature."""
         self._key.verify(signature, data)
 
     def to_bytes(self) -> bytes:
         """Dump the Ed25519 public key to bytes."""
-        return self._key.public_bytes(
-            Encoding.Raw,
-            PublicFormat.Raw
-        )
+        return self._pub_bytes
 
     @classmethod
     def from_bytes(cls, key_bytes: bytes) -> Self:
         """Load Ed25519 public key from bytes."""
-        return cls(ed25519.Ed25519PublicKey.from_public_bytes(key_bytes))
+        return cls(ed25519.Ed25519PublicKey.from_public_bytes(key_bytes),
+                   key_bytes)
 
 
 class Ed25519PrivateKey(PrivateKey):
@@ -176,17 +184,24 @@ class Ed25519PrivateKey(PrivateKey):
 
     name = 'ed25519'
 
+    def __init__(self, pub_key, priv_key, priv_bytes=None):
+        super().__init__(pub_key, priv_key)
+        if priv_bytes is None:
+            self._priv_bytes = self._key.private_bytes(
+                Encoding.Raw,
+                PrivateFormat.Raw,
+                NoEncryption()
+            )
+        else:
+            self._priv_bytes = priv_bytes
+
     def sign(self, data: bytes) -> bytes:
         """Sign the data."""
         return self._key.sign(data)
 
     def to_bytes(self) -> bytes:
         """Dump the Ed25519 private key to bytes."""
-        return self._key.private_bytes(
-            Encoding.Raw,
-            PrivateFormat.Raw,
-            NoEncryption()
-        )
+        return self._priv_bytes
 
     @classmethod
     def from_bytes(cls, priv_bytes: bytes,
@@ -197,7 +212,7 @@ class Ed25519PrivateKey(PrivateKey):
             pub_key = Ed25519PublicKey(priv_key.public_key())
         else:
             pub_key = Ed25519PublicKey.from_bytes(pub_bytes)
-        return cls(pub_key, priv_key)
+        return cls(pub_key, priv_key, priv_bytes)
 
     @classmethod
     def generate(cls):
@@ -213,21 +228,29 @@ class Ed448PublicKey(PublicKey):
 
     name = 'ed448'
 
+    def __init__(self, key, pub_bytes=None):
+        super().__init__(key)
+        if pub_bytes is None:
+            self._pub_bytes = self._key.public_bytes(
+                Encoding.Raw,
+                PublicFormat.Raw
+            )
+        else:
+            self._pub_bytes = pub_bytes
+
     def verify(self, signature: bytes, data: bytes):
         """Verify the signature."""
         self._key.verify(signature, data)
 
     def to_bytes(self) -> bytes:
         """Dump the Ed448 public key to bytes."""
-        return self._key.public_bytes(
-            Encoding.Raw,
-            PublicFormat.Raw
-        )
+        return self._pub_bytes
 
     @classmethod
     def from_bytes(cls, key_bytes: bytes) -> Self:
         """Load Ed448 public key from bytes."""
-        return cls(ed448.Ed448PublicKey.from_public_bytes(key_bytes))
+        return cls(ed448.Ed448PublicKey.from_public_bytes(key_bytes),
+                   key_bytes)
 
 
 class Ed448PrivateKey(PrivateKey):
@@ -236,17 +259,24 @@ class Ed448PrivateKey(PrivateKey):
 
     name = 'ed448'
 
+    def __init__(self, pub_key, priv_key, priv_bytes=None):
+        super().__init__(pub_key, priv_key)
+        if priv_bytes is None:
+            self._priv_bytes = self._key.private_bytes(
+                Encoding.Raw,
+                PrivateFormat.Raw,
+                NoEncryption()
+            )
+        else:
+            self._priv_bytes = priv_bytes
+
     def sign(self, data: bytes) -> bytes:
         """Sign the data."""
         return self._key.sign(data)
 
     def to_bytes(self) -> bytes:
         """Dump the Ed448 private key to bytes."""
-        return self._key.private_bytes(
-            Encoding.Raw,
-            PrivateFormat.Raw,
-            NoEncryption()
-        )
+        return self._priv_bytes
 
     @classmethod
     def from_bytes(cls, priv_bytes: bytes,
@@ -257,7 +287,7 @@ class Ed448PrivateKey(PrivateKey):
             pub_key = Ed448PublicKey(priv_key.public_key())
         else:
             pub_key = Ed448PublicKey.from_bytes(pub_bytes)
-        return cls(pub_key, priv_key)
+        return cls(pub_key, priv_key, priv_bytes)
 
     @classmethod
     def generate(cls):
@@ -273,6 +303,16 @@ class RSAPublicKeySHA256(PublicKey):
 
     name = 'rsa-sha256'
 
+    def __init__(self, key, pub_bytes=None):
+        super().__init__(key)
+        if pub_bytes is None:
+            self._pub_bytes = self._key.public_bytes(
+                Encoding.DER,
+                PublicFormat.SubjectPublicKeyInfo
+            )
+        else:
+            self._pub_bytes = pub_bytes
+
     def verify(self, signature: bytes, data: bytes):
         """Verify the signature."""
         self._key.verify(
@@ -287,15 +327,12 @@ class RSAPublicKeySHA256(PublicKey):
 
     def to_bytes(self) -> bytes:
         """Dump the RSA public key to bytes."""
-        return self._key.public_bytes(
-            Encoding.DER,
-            PublicFormat.SubjectPublicKeyInfo
-        )
+        return self._pub_bytes
 
     @classmethod
     def from_bytes(cls, key_bytes: bytes) -> Self:
         """Load RSA public key from bytes."""
-        return cls(load_der_public_key(key_bytes))
+        return cls(load_der_public_key(key_bytes), key_bytes)
 
 
 class RSAPrivateKeySHA256(PrivateKey):
@@ -303,6 +340,17 @@ class RSAPrivateKeySHA256(PrivateKey):
     """RSA private key."""
 
     name = 'rsa-sha256'
+
+    def __init__(self, pub_key, priv_key, priv_bytes=None):
+        super().__init__(pub_key, priv_key)
+        if priv_bytes is None:
+            self._priv_bytes = self._key.private_bytes(
+                Encoding.DER,
+                PrivateFormat.TraditionalOpenSSL,
+                NoEncryption()
+            )
+        else:
+            self._priv_bytes = priv_bytes
 
     def sign(self, data: bytes) -> bytes:
         """Sign the data."""
@@ -317,11 +365,7 @@ class RSAPrivateKeySHA256(PrivateKey):
 
     def to_bytes(self) -> bytes:
         """Dump the RSA private key to bytes."""
-        return self._key.private_bytes(
-            Encoding.DER,
-            PrivateFormat.TraditionalOpenSSL,
-            NoEncryption()
-        )
+        return self._priv_bytes
 
     @classmethod
     def from_bytes(cls, priv_bytes: bytes,
@@ -331,8 +375,8 @@ class RSAPrivateKeySHA256(PrivateKey):
         if pub_bytes is None:
             pub_key = RSAPublicKeySHA256(priv_key.public_key())
         else:
-            pub_key = load_der_public_key(pub_bytes)
-        return cls(pub_key, priv_key)
+            pub_key = RSAPublicKeySHA256.from_bytes(pub_bytes)
+        return cls(pub_key, priv_key, priv_bytes)
 
     @classmethod
     def generate(cls, key_size=4096):
