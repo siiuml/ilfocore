@@ -45,8 +45,10 @@ class BaseSession(udpnode.BaseSession):
 
     Instance variables:
 
-    - sig_key : signature.PrivateKey
+    - pub_key : tuple[str, bytes]
         The identity of other node.
+    - sig_key : signature.PublicKey
+        The PublicKey object.
     - ...
 
     See udpnode.BaseSession.__doc__ for more information.
@@ -54,7 +56,7 @@ class BaseSession(udpnode.BaseSession):
     """
 
     def __init__(self, conn):
-        self.__temp: str = None
+        self.pub_key: tuple[str, bytes] = None
         self.sig_key: signature.PublicKey = None
         super().__init__(conn)
         self.handle = self.handle_next
@@ -78,7 +80,7 @@ class BaseSession(udpnode.BaseSession):
     def handle_sig_alg(self, alg: bytes):
         """Handle signature algorithm."""
         try:
-            self.__temp = str(alg, ENCODING)
+            self.pub_key = (str(alg, ENCODING), None)
         except ValueError:
             # Close the session
             self.close()
@@ -86,12 +88,13 @@ class BaseSession(udpnode.BaseSession):
     def handle_sig_key(self, key: bytes):
         """Handle public key for signature."""
         try:
-            self.sig_key = self.node.get_verify(self.__temp).from_bytes(key)
+            alg, _ = self.pub_key
+            self.sig_key = self.node.get_verify(alg).from_bytes(key)
+            self.pub_key = (alg, key)
         except ValueError:
             # Close the session
             self.close()
             return
-        del self.__temp
 
     def handle_sig(self, sig: bytes):
         """Handle the signature."""
@@ -102,7 +105,7 @@ class BaseSession(udpnode.BaseSession):
             # Close the session
             self.close()
             return
-        self.node.session_groups[self.sig_key][self.address] = self
+        self.node.session_groups[self.pub_key][self.address] = self
         self.setup_common()
 
     def setup_common(self):
@@ -123,11 +126,11 @@ class BaseSession(udpnode.BaseSession):
     def close(self):
         """Close session, interrupt thread if multi-threaded."""
         if self.sig_key in self.node.session_groups:
-            group = self.node.session_groups[self.sig_key]
+            group = self.node.session_groups[self.pub_key]
             if self.address in group:
                 del group[self.address]
                 if not group:
-                    del self.node.session_groups[self.sig_key]
+                    del self.node.session_groups[self.pub_key]
         super().close()
 
 
@@ -162,17 +165,17 @@ class Node(udpnode.Node):
     ):
         self.sig_key = sig_key
         self.session_groups: defaultdict[
-            signature.PublicKey, dict[Address, SessionClass]
+            tuple[str, bytes], dict[Address, SessionClass]
         ] = defaultdict(dict)
         super().__init__(server_address, SessionClass, bind_and_activate)
 
     def send_packages_to(self, packages: Iterable[bytes],
-                         target_sig_key: signature.PublicKey):
+                         target_sig_key: tuple[str, bytes]):
         """Send packages to target nodes."""
         for session in self.session_groups[target_sig_key].values():
             session.send_packages(packages)
 
-    def sendto(self, package: bytes, target_sig_key: signature.PublicKey):
+    def sendto(self, package: bytes, target_sig_key: tuple[str, bytes]):
         """Send package to target nodes."""
         for session in self.session_groups[target_sig_key].values():
             session.send(package)
