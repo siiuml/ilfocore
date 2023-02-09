@@ -18,6 +18,7 @@ from secrets import randbelow, token_bytes
 from socketserver import UDPServer
 from threading import Lock, Thread
 from time import monotonic as time
+from types import MethodType
 from typing import Iterable, Self
 from .constants import (
     ALG_SIZE_LEN,
@@ -30,17 +31,7 @@ from .constants import (
     ReqType
 )
 from .lib import asymmetric, authentication, cipher, kdf
-
-
-def processing_thread(queue: Queue):
-    """Thread to process requests.
-
-    Put None into the queue to cancel the thread.
-
-    """
-    while (item := queue.get()) is not None:
-        con, request = item
-        con.process(request)
+from .utils.multithread import call_forever, in_queue
 
 
 Packet = namedtuple('Packet', ['seq', 'data'])
@@ -59,7 +50,7 @@ class Connection(metaclass=ABCMeta):
     Methods for the caller:
 
     - __init__(address: Address, node: Node)
-    - process_noblock(request: bytes)
+    - process(request: bytes)
     - retransmit()
     - send(package: bytes)
     - send_packages(packages: typing.Iterable[bytes])
@@ -138,7 +129,7 @@ class Connection(metaclass=ABCMeta):
         # Multi-threading
         if self.multithreaded:
             self._queue: Queue[bytes | None] = Queue()
-            self.thread = Thread(target=processing_thread,
+            self.thread = Thread(target=call_forever,
                                  args=(self._queue,))
 
     def start(self):
@@ -204,7 +195,6 @@ class Connection(metaclass=ABCMeta):
         if self in self.node.retrans_cons:
             self.node.retrans_cons.remove(self)
         self.finish()
-        self._recv_buf.close()
         self.stop()
 
     def parse(self, buf: BytesIO) -> bytes | None:
@@ -337,29 +327,26 @@ class Connection(metaclass=ABCMeta):
         buf.read(TYPE_SIZE)
         seq = buf.read(self.seq_size)
         # Ignore data left in request buffer
-        self._send_buf_lock.acquire()
-        if (buf := self._send_buf) and seq == buf[0].seq:
-            # Pop packet in send_buf
-            buf.popleft()
-            # Reset deadline
-            self.update_deadline()
-            # Send next packet
-            if buf:
-                self.node.socket.sendto(buf[0].data,
-                                        self.address)
-            else:
-                self.node.group_lock.acquire()
-                if self in self.node.retrans_cons:
-                    self.node.retrans_cons.remove(self)
-                self.node.group_lock.release()
-        self._send_buf_lock.release()
+        with self._send_buf_lock:
+            if (buf := self._send_buf) and seq == buf[0].seq:
+                # Pop packet in send_buf
+                buf.popleft()
+                # Reset deadline
+                self.update_deadline()
+                # Send next packet
+                if buf:
+                    self.node.socket.sendto(buf[0].data,
+                                            self.address)
+                    return
+                with self.node.group_lock:
+                    if self in self.node.retrans_cons:
+                        self.node.retrans_cons.remove(self)
 
     def process_nak(self, request: bytes):
         """Called by process_request() to process NAK message."""
-        self._send_buf_lock.acquire()
-        if self._send_buf and request[TYPE_SIZE:] == self._send_buf[0].seq:
-            self.retransmit()
-        self._send_buf_lock.release()
+        with self._send_buf_lock:
+            if self._send_buf and request[TYPE_SIZE:] == self._send_buf[0].seq:
+                self.retransmit()
 
     def process_syn(self, request: bytes):
         """Called by process_request() to process SYN message.
@@ -409,16 +396,8 @@ class Connection(metaclass=ABCMeta):
                 self.process_capture(req_type, request)
 
     def process(self, request: bytes):
-        """Called by process_noblock() if not multi-threaded."""
+        """Split the request type."""
         self.process_request(request[:TYPE_SIZE], request)
-
-    process_noblock = process
-    process_noblock.__doc__ = """Called by the node to process a request.
-
-    Overriden by  put the request into queue for another thread
-    to make it be processed without block.
-
-    """
 
     def send_packages(self, packages: Iterable[bytes]):
         """Send a list of node packages.
@@ -448,24 +427,24 @@ class Connection(metaclass=ABCMeta):
             buf.write(size + package)
         buf.seek(0)
         size = self.max_packet_size
-        self._send_buf_lock.acquire()
-        is_latest = not bool(self._send_buf)
-        while packet := buf.read(size):
-            self._send_seq += 1
-            if (seq := self._send_seq) < self._max_seq_number:
-                seq = seq.to_bytes(self.seq_size, BYTEORDER)
-            packet = ReqType.ENQ + seq + packet
-            packet += self.mac_key.digest(packet)
-            self._send_buf.append(Packet(seq, packet))
-        if is_latest:
-            # No previous packets to send
-            self.update_deadline()
-            packet = self._send_buf[0].data
-            self.node.socket.sendto(packet, self.address)
-            self.node.group_lock.acquire()
-            self.node.retrans_cons.add(self)
-            self.node.group_lock.release()
-        self._send_buf_lock.release()
+        with self._send_buf_lock:
+            is_latest = not bool(self._send_buf)
+            while packet := buf.read(size):
+                self._send_seq += 1
+                if (seq := self._send_seq) < self._max_seq_number:
+                    seq = seq.to_bytes(self.seq_size, BYTEORDER)
+                packet = ReqType.ENQ + seq + packet
+                packet += self.mac_key.digest(packet)
+                self._send_buf.append(Packet(seq, packet))
+            if not self._send_buf:
+                return
+            if is_latest:
+                # No previous packets to send
+                self.update_deadline()
+                packet = self._send_buf[0].data
+                self.node.socket.sendto(packet, self.address)
+                with self.node.group_lock:
+                    self.node.retrans_cons.add(self)
 
     def send(self, package: bytes):
         """Send a node package."""
@@ -487,9 +466,8 @@ class Connection(metaclass=ABCMeta):
 
         """
         if self._retries < self.node.retries:
-            self._send_buf_lock.acquire()
-            _, packet = self._send_buf[0]
-            self._send_buf_lock.release()
+            with self._send_buf_lock:
+                _, packet = self._send_buf[0]
             self.node.socket.sendto(packet, self.address)
             self._retries += 1
             self.update_deadline()
@@ -603,12 +581,6 @@ class ConnectionToClient(HalfConnection):
     seq_size = 4
 
     def __init__(self, address: Address, node):
-        """Constructor.
-
-        Establish a session.
-
-        """
-
         super().__init__(address, node)
         self._max_seq_number = 1 << self.seq_size * 8
         self._send_seq = self.get_init_seq(self._max_seq_number)
@@ -620,16 +592,7 @@ class ConnectionToClient(HalfConnection):
                                 self.handle_alg,
                                 self.handle_mac])
 
-    def process_noblock(self, request):
-        """Called by the node.
-        To process a request from client.
-
-        Put the request into client request queue
-        to process it in another thread.
-
-        """
-        self.node.client_request_queue.put_nowait((self, request))
-
+    @in_queue('node.client_request_queue')
     def process_syn(self, request: bytes):
         """Process SYN message.
 
@@ -680,8 +643,9 @@ class ConnectionToClient(HalfConnection):
 
         # Acknowledge
         self.send_ack()
-        self.process = super().process
         self.process_syn = super().process_syn
+        self.process = MethodType(
+            in_queue('node.client_request_queue')(Connection.process), self)
 
     process = process_syn
 
@@ -780,11 +744,10 @@ class ConnectionToClient(HalfConnection):
 
     def close(self):
         """Close the connection."""
-        self.node.group_lock.acquire()
-        if self.address in self.node.clients:
-            del self.node.clients[self.address]
-        super().close()
-        self.node.group_lock.release()
+        with self.node.group_lock:
+            if self.address in self.node.clients:
+                del self.node.clients[self.address]
+            super().close()
 
 
 class ConnectionToServer(HalfConnection):
@@ -794,7 +757,6 @@ class ConnectionToServer(HalfConnection):
     conn_id_size = 16
 
     def __init__(self, address: Address, node):
-
         super().__init__(address, node)
         self._max_seq_number: int = None
         self._send_seq: int = None
@@ -806,6 +768,7 @@ class ConnectionToServer(HalfConnection):
                                 self.handle_alg,
                                 self.handle_asym])
 
+    @in_queue('node.server_request_queue')
     def setup(self):
         """Send SYN message at first to start the connection.
 
@@ -849,16 +812,7 @@ class ConnectionToServer(HalfConnection):
         self.node.retrans_cons.add(self)
         self.update_deadline()
 
-    def process_noblock(self, request):
-        """Called by the node.
-        To process a request from server.
-
-        Put the request into server request queue
-        to process it in another thread.
-
-        """
-        self.node.server_request_queue.put_nowait((self, request))
-
+    @in_queue('node.server_request_queue')
     def process_ack(self, request: bytes):
         """Process ACK message.
 
@@ -910,8 +864,9 @@ class ConnectionToServer(HalfConnection):
 
         # Key exchange
         self.send_asym()
-        self.process = super().process
         self.process_ack = super().process_ack
+        self.process = MethodType(
+            in_queue('node.server_request_queue')(Connection.process), self)
 
     process = process_ack
 
@@ -986,11 +941,10 @@ class ConnectionToServer(HalfConnection):
 
     def close(self):
         """Close the connection."""
-        self.node.group_lock.acquire()
-        if self.address in self.node.servers:
-            del self.node.servers[self.address]
-        super().close()
-        self.node.group_lock.release()
+        with self.node.group_lock:
+            if self.address in self.node.servers:
+                del self.node.servers[self.address]
+            super().close()
 
 
 class BaseSession(Connection):
@@ -1001,7 +955,7 @@ class BaseSession(Connection):
     Methods for the caller:
 
     - from_connection(conn: HalfConnection)
-    - process_noblock(request: bytes)
+    - process(request: bytes)
     - start()
     - finish()
     - stop()
@@ -1019,7 +973,8 @@ class BaseSession(Connection):
 
     # if not multi-threaded for sessions
     - start()
-    - process_noblock(request)
+    - setup()
+    - process()
     - stop()
 
     - send_nak()
@@ -1098,25 +1053,14 @@ class BaseSession(Connection):
         """Establish a session from a connection."""
         return cls(conn)
 
-    def process_noblock(self, request):
-        """Called by the node. Put request into queue for another thread.
-
-        May be overriden like this if session handler is not multi-threaded:
-
-        def process_noblock(self, request):
-            # Single-threaded
-            self.process(request)
-
-        """
-        self._queue.put_nowait((self, request))
+    process = in_queue('_queue')(Connection.process)
 
     def close(self):
         """Close session, interrupt thread if multi-threaded."""
-        self.node.group_lock.acquire()
-        if self.address in self.node.sessions:
-            del self.node.sessions[self.address]
-        super().close()
-        self.node.group_lock.release()
+        with self.node.group_lock:
+            if self.address in self.node.sessions:
+                del self.node.sessions[self.address]
+            super().close()
 
 
 class Node(UDPServer):
@@ -1230,14 +1174,14 @@ class Node(UDPServer):
                 tuple[bytes, ConnectionToServer] | None
             ] = Queue()
             self.server_request_thread = Thread(
-                target=processing_thread, args=(self.server_request_queue,))
+                target=call_forever, args=(self.server_request_queue,))
         # As server
         if self.has_queue_to_client:
             self.client_request_queue: Queue[
                 tuple[bytes, ConnectionToClient] | None
             ] = Queue()
             self.client_request_thread = Thread(
-                target=processing_thread, args=(self.client_request_queue,))
+                target=call_forever, args=(self.client_request_queue,))
 
         super().__init__(server_address, SessionClass, bind_and_activate)
 
@@ -1251,29 +1195,31 @@ class Node(UDPServer):
     def service_actions(self):
         """Keepalive and retransmission."""
         now = time()
-        self.group_lock.acquire()
-        if now >= self.__keepalive_send_time:
-            if now >= self.__keepalive_deadline:
-                # Close all dead connections
-                for con in self.dead_cons:
-                    con.close()
-                # Reset status
-                self.dead_cons = set(
-                    (self.sessions | self.servers | self.clients).values())
-                # Reset deadline
-                self.__keepalive_deadline = time() + self.keepalive_timeout
-            # Send keepalive packets
-            # To established sessions only
-            for con in self.sessions.values():
-                self.socket.sendto(b'', con.address)
-            # Reset time to send keepalive packet
-            self.__keepalive_send_time = time() + self.keepalive_interval
+        with self.group_lock:
+            if now >= self.__keepalive_send_time:
+                if now >= self.__keepalive_deadline:
+                    # Close all dead connections
+                    for con in self.dead_cons:
+                        con.close()
+                    # Reset status
+                    self.dead_cons = set(
+                        (self.sessions |
+                         self.servers |
+                         self.clients).values())
+                    # Reset deadline
+                    self.__keepalive_deadline = time(
+                    ) + self.keepalive_timeout
+                # Send keepalive packets
+                # To established sessions only
+                for con in self.sessions.values():
+                    self.socket.sendto(b'', con.address)
+                # Reset time to send keepalive packet
+                self.__keepalive_send_time = time() + self.keepalive_interval
 
-        # Retransmission
-        for con in self.retrans_cons:
-            if now >= con.deadline:
-                con.retransmit()
-        self.group_lock.release()
+            # Retransmission
+            for con in self.retrans_cons:
+                if now >= con.deadline:
+                    con.retransmit()
 
     def get_request(self):
         """Get the request from the socket"""
@@ -1282,27 +1228,23 @@ class Node(UDPServer):
 
     def process_request(self, request: bytes, target_address: Address):
         """Process one request."""
-        self.group_lock.acquire()
-        for group in (self.sessions, self.servers, self.clients):
-            if con := group.get(target_address):
-                self.group_lock.release()
-                if con in self.dead_cons:
-                    # Connection alive
-                    self.dead_cons.remove(con)
-                if request:
-                    con.process_noblock(request)
-                break
-        else:
-            self.group_lock.release()
-            # New connection
-            self.establish_conn_to_client(request, target_address)
+        with self.group_lock:
+            for group in (self.sessions, self.servers, self.clients):
+                if con := group.get(target_address):
+                    if con in self.dead_cons:
+                        # Connection alive
+                        self.dead_cons.remove(con)
+                    if request:
+                        con.process(request)
+                    return
+        # New connection
+        self.establish_conn_to_client(request, target_address)
 
     def connect(self, address: Address):
         """New connection to server."""
         conn = self.ServerClass(address, self)
-        self.group_lock.acquire()
-        self.servers[address] = conn
-        self.group_lock.release()
+        with self.group_lock:
+            self.servers[address] = conn
         conn.start()
 
     def establish_conn_to_client(self, request: bytes, addr: Address):
@@ -1312,14 +1254,13 @@ class Node(UDPServer):
             # Lock acquired by caller process_request()
             self.clients[addr] = conn
             conn.start()
-            conn.process_noblock(request)
+            conn.process(request)
 
     def establish_session(self, conn: HalfConnection):
         """Establish a new session, called by HalfConnection methods."""
         con = self.SessionClass.from_connection(conn)
-        self.group_lock.acquire()
-        self.sessions[conn.address] = con
-        self.group_lock.release()
+        with self.group_lock:
+            self.sessions[conn.address] = con
         con.start()
 
     def close(self):

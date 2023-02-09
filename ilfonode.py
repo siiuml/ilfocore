@@ -14,6 +14,7 @@ from typing import Iterable
 from . import udpnode
 from .constants import Address, ENCODING
 from .lib import signature
+from .utils.multithread import in_queue
 
 
 class BaseSession(udpnode.BaseSession):
@@ -64,6 +65,7 @@ class BaseSession(udpnode.BaseSession):
                                 self.handle_sig_key,
                                 self.handle_sig])
 
+    @in_queue('_queue')
     def setup(self):
         """Setup to send signature.
 
@@ -75,7 +77,6 @@ class BaseSession(udpnode.BaseSession):
         self.send_packages((bytes(sig_key.name, ENCODING),
                             sig_key.public_key.to_bytes(),
                             sig_key.sign(self.recv_conn_id + send_key)))
-        super().setup()
 
     def handle_sig_alg(self, alg: bytes):
         """Handle signature algorithm."""
@@ -94,7 +95,6 @@ class BaseSession(udpnode.BaseSession):
         except ValueError:
             # Close the session
             self.close()
-            return
 
     def handle_sig(self, sig: bytes):
         """Handle the signature."""
@@ -164,6 +164,8 @@ class Node(udpnode.Node):
         bind_and_activate=True
     ):
         self.sig_key = sig_key
+        self.pub_key = (self.sig_key.name,
+                        self.sig_key.public_key.to_bytes())
         self.session_groups: defaultdict[
             tuple[str, bytes], dict[Address, SessionClass]
         ] = defaultdict(dict)

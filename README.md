@@ -52,9 +52,9 @@ if __name__ == "__main__":
     node1.connect(addr2)
     # Wait for the session to get established
     sleep(1)
-    # Get the session and send message to node2
-    con = node1.sessions[addr2]
-    con.send(b'hello')  # Out: ('127.0.0.1', 9998): Recv b'hello'
+    # Send message to node2
+    node1.sendto(b'hello', node2.pub_key)
+    # Out: ('127.0.0.1', 9998): Recv b'hello'
     # Close nodes
     node1.close()
     node2.close()

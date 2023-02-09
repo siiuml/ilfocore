@@ -2,14 +2,10 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-""""
-ilfocore
 
-The core of ilafalseone.
 """
+ilfocore.utils
 
-__author__ = 'SiumLhahah'
-__version__ = '0.1.6'
+Ilfocore utilities.
 
-from .ilfonode import BaseSession, Node
-from .lib import *
+"""
