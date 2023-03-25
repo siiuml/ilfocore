@@ -174,13 +174,17 @@ class Node(udpnode.Node):
     def send_packages_to(self, packages: Iterable[bytes],
                          target_sig_key: tuple[str, bytes]):
         """Send packages to target nodes."""
-        for session in self.session_groups[target_sig_key].values():
+        with self.group_lock:
+            sessions = self.session_groups.get(target_sig_key)
+            if sessions is None:
+                return
+            sessions = tuple(sessions.values())
+        for session in sessions:
             session.send_packages(packages)
 
     def sendto(self, package: bytes, target_sig_key: tuple[str, bytes]):
         """Send package to target nodes."""
-        for session in self.session_groups[target_sig_key].values():
-            session.send(package)
+        self.send_packages_to((package,), target_sig_key)
 
     get_sign = staticmethod(signature.get_sign)
     get_verify = staticmethod(signature.get_verify)

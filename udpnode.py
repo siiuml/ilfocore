@@ -246,6 +246,7 @@ class Connection(metaclass=ABCMeta):
                     is_packing_size = False
                 else:
                     size_len -= 128
+                    is_packing_size = bool(size_len)
             if is_packing_size:
                 # Try to get the size from bytes
                 size = buf.read(size_len)
@@ -448,7 +449,7 @@ class Connection(metaclass=ABCMeta):
 
     def send(self, package: bytes):
         """Send a node package."""
-        self.send_packages([package])
+        self.send_packages((package,))
 
     def update_deadline(self):
         """Reset deadline from current time.
