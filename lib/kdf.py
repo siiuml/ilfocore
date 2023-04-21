@@ -141,7 +141,7 @@ def get_kdf(algorithm: str) -> type[KDF]:
     """Get KDF class."""
     if kdf := kdfs.get(algorithm.lower()):
         return kdf
-    raise AlgorithmError("Unsupported key exchange algorithm")
+    raise AlgorithmError("Unsupported key derivation function")
 
 
 # Cleanup locals()

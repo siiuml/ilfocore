@@ -165,7 +165,10 @@ class Ed25519PublicKey(PublicKey):
 
     def verify(self, signature: bytes, data: bytes):
         """Verify the signature."""
-        self._key.verify(signature, data)
+        try:
+            self._key.verify(signature, data)
+        except Exception:
+            raise ValueError
 
     def to_bytes(self) -> bytes:
         """Dump the Ed25519 public key to bytes."""
@@ -174,8 +177,11 @@ class Ed25519PublicKey(PublicKey):
     @classmethod
     def from_bytes(cls, key_bytes: bytes) -> Self:
         """Load Ed25519 public key from bytes."""
-        return cls(ed25519.Ed25519PublicKey.from_public_bytes(key_bytes),
-                   key_bytes)
+        try:
+            key = ed25519.Ed25519PublicKey.from_public_bytes(key_bytes)
+        except Exception:
+            raise ValueError
+        return cls(key, key_bytes)
 
 
 class Ed25519PrivateKey(PrivateKey):
@@ -240,7 +246,10 @@ class Ed448PublicKey(PublicKey):
 
     def verify(self, signature: bytes, data: bytes):
         """Verify the signature."""
-        self._key.verify(signature, data)
+        try:
+            self._key.verify(signature, data)
+        except Exception:
+            raise ValueError
 
     def to_bytes(self) -> bytes:
         """Dump the Ed448 public key to bytes."""
@@ -249,8 +258,11 @@ class Ed448PublicKey(PublicKey):
     @classmethod
     def from_bytes(cls, key_bytes: bytes) -> Self:
         """Load Ed448 public key from bytes."""
-        return cls(ed448.Ed448PublicKey.from_public_bytes(key_bytes),
-                   key_bytes)
+        try:
+            key = ed448.Ed448PublicKey.from_public_bytes(key_bytes)
+        except Exception:
+            raise ValueError
+        return cls(key, key_bytes)
 
 
 class Ed448PrivateKey(PrivateKey):
@@ -315,15 +327,18 @@ class RSAPublicKeySHA256(PublicKey):
 
     def verify(self, signature: bytes, data: bytes):
         """Verify the signature."""
-        self._key.verify(
-            signature,
-            data,
-            padding.PSS(
-                padding.MGF1(hashes.SHA256()),
-                padding.PSS.MAX_LENGTH
-            ),
-            hashes.SHA256()
-        )
+        try:
+            self._key.verify(
+                signature,
+                data,
+                padding.PSS(
+                    padding.MGF1(hashes.SHA256()),
+                    padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+        except Exception:
+            raise ValueError
 
     def to_bytes(self) -> bytes:
         """Dump the RSA public key to bytes."""

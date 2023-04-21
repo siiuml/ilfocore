@@ -9,7 +9,7 @@ Safe node of ilfocore, providing authentic transmission support.
 
 """
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from typing import Iterable
 from . import udpnode
 from .constants import Address, ENCODING
@@ -32,7 +32,7 @@ class BaseSession(udpnode.BaseSession):
     Methods that may be overridden:
 
     - handle_common(data: bytes)
-    - setup_common()    # if you use handle_next()
+    - setup_common()
 
     # if not multi-threaded for sessions
     - start()
@@ -60,10 +60,6 @@ class BaseSession(udpnode.BaseSession):
         self.pub_key: tuple[str, bytes] = None
         self.sig_key: signature.PublicKey = None
         super().__init__(conn)
-        self.handle = self.handle_next
-        self._handlers = deque([self.handle_sig_alg,
-                                self.handle_sig_key,
-                                self.handle_sig])
 
     @in_queue('_queue')
     def setup(self):
@@ -72,35 +68,47 @@ class BaseSession(udpnode.BaseSession):
         May be overriden.
 
         """
-        _, send_key, _ = self.asym_keys
         sig_key = self.node.sig_key
+        secret, send_key, _ = self.asym_keys
+        alg = secret.name
+        alg = len(alg).to_bytes() + bytes(alg, ENCODING)
         self.send_packages((bytes(sig_key.name, ENCODING),
                             sig_key.public_key.to_bytes(),
-                            sig_key.sign(self.recv_conn_id + send_key)))
+                            sig_key.sign(self.recv_conn_id + alg + send_key)))
 
     def handle_sig_alg(self, alg: bytes):
         """Handle signature algorithm."""
+        self.handle = self.handle_sig_key
         try:
             self.pub_key = (str(alg, ENCODING), None)
-        except ValueError:
+        except UnicodeDecodeError:
             # Close the session
             self.close()
+            return
+
+    handle = handle_sig_alg
 
     def handle_sig_key(self, key: bytes):
         """Handle public key for signature."""
+        self.handle = self.handle_sig
         try:
             alg, _ = self.pub_key
             self.sig_key = self.node.get_verify(alg).from_bytes(key)
+            alg = self.sig_key.name
             self.pub_key = (alg, key)
         except ValueError:
             # Close the session
             self.close()
+            return
 
     def handle_sig(self, sig: bytes):
         """Handle the signature."""
+        self.handle = super().handle
         try:
-            _, _, recv_key = self.asym_keys
-            self.sig_key.verify(sig, self.send_conn_id + recv_key)
+            secret, _, recv_key = self.asym_keys
+            alg = secret.name
+            alg = len(alg).to_bytes() + bytes(alg, ENCODING)
+            self.sig_key.verify(sig, self.send_conn_id + alg + recv_key)
         except ValueError:
             # Close the session
             self.close()
@@ -109,9 +117,9 @@ class BaseSession(udpnode.BaseSession):
         self.setup_common()
 
     def setup_common(self):
-        """Start to handle common message.
+        """Start to handle common messages.
 
-        May be overriden to continue to use handle_next().
+        May be overriden.
 
         """
         self.handle = self.handle_common
@@ -154,7 +162,7 @@ class Node(udpnode.Node):
 
     """
 
-    version = b'node2ilfo'
+    version = b'node2ilfo2'
 
     def __init__(
         self,

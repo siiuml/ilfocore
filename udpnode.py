@@ -76,11 +76,11 @@ class Connection(metaclass=ABCMeta):
     - self._recv_buf : io.BytesIO
     - self.__not_packing : bool
     - self.__size_left : int
-    - self._send_buf : io.BytesIO
+    - self._is_finished : bool
+    - self._send_buf : deque[Packet]
     - self._send_buf_lock : threading.Lock
     - self.deadline : Real
     - self._retries : int
-    - self._handlers : deque[typing.Callable[[bytes], None]]
 
     - self.version: bytes
     - self.max_packet_size : int
@@ -115,6 +115,8 @@ class Connection(metaclass=ABCMeta):
         self.__not_packing = True
         # The size of the rest of a node package
         self.__size_left = 0
+        # If the connection is finished, then it won't handle any packages
+        self._is_finished = False
 
         # For sending
         # Datagram packets for retransmission
@@ -158,18 +160,14 @@ class Connection(metaclass=ABCMeta):
 
         """
 
-    def handle_next(self, data: bytes):
-        """Handle package by next handler."""
-        handler = self._handlers.popleft()
-        handler(data)
-
     def finish(self):
         """Finish the connection completely, called by close().
         Send EOT message to inform the other node.
 
-        May be overriden.
+        Overriden by ClientClass.
 
         """
+        self._is_finished = True
         data = ReqType.EOT + self.send_conn_id
         data = data + self.mac_key.digest(data)
         self.node.socket.sendto(data, self.address)
@@ -254,7 +252,7 @@ class Connection(metaclass=ABCMeta):
                     # Got all bytes in need
                     self.__size_left = int.from_bytes(
                         self._recv_buf.getvalue() + size, BYTEORDER)
-                    self._recv_buf = BytesIO()
+                    self._recv_buf.__init__()
                     # Start to pack the package
                     self.__not_packing = False
                 else:
@@ -271,7 +269,7 @@ class Connection(metaclass=ABCMeta):
             package = self._recv_buf.getvalue() + part
             # Reset status
             self.__not_packing = True
-            self._recv_buf = BytesIO()
+            self._recv_buf.__init__()
             # Return the full package
             return package
         self._recv_buf.write(part)
@@ -291,7 +289,7 @@ class Connection(metaclass=ABCMeta):
             self.node.socket.sendto(ReqType.NAK + seq, self.address)
             return
         buf = BytesIO(msg)
-        buf.read(TYPE_SIZE)
+        buf.seek(TYPE_SIZE)
         seq_bytes = buf.read(self.seq_size)
         seq = int.from_bytes(seq_bytes, BYTEORDER)
         if seq > self._recv_seq:
@@ -314,6 +312,8 @@ class Connection(metaclass=ABCMeta):
                     return
                 # Handle package
                 self.handle(package)
+                if self._is_finished:
+                    break
 
     def process_ack(self, request: bytes):
         """Called by process_request() to process ACK message.
@@ -325,7 +325,7 @@ class Connection(metaclass=ABCMeta):
         if not (request := self.verify_mac(request)):
             return
         buf = BytesIO(request)
-        buf.read(TYPE_SIZE)
+        buf.seek(TYPE_SIZE)
         seq = buf.read(self.seq_size)
         # Ignore data left in request buffer
         with self._send_buf_lock:
@@ -492,8 +492,7 @@ class HalfConnection(Connection):
         self.kdf: kdf.KDF = None
         self.cipher_key = cipher.NoCipher.generate()
         self._alg_buf: deque[str] = deque()
-
-        self.handle = self.handle_next
+        self._session: BaseSession = None
 
     @property
     def recv_seq(self) -> int:
@@ -510,6 +509,14 @@ class HalfConnection(Connection):
         """Sequence number sent."""
         return self._send_seq
 
+    def setup(self):
+        """Setup, called by start();
+
+        Overriden by ServerClass.
+
+        """
+        self.handle = self.handle_alg
+
     def check_version(self):
         """Check protocol version of client.
 
@@ -521,7 +528,17 @@ class HalfConnection(Connection):
 
     def handle_alg(self, data: bytes):
         """Handle algorithm package."""
-        self._alg_buf.append(str(data, ENCODING))
+        try:
+            self._alg_buf.append(str(data, ENCODING))
+        except UnicodeDecodeError:
+            self.close()
+            return
+        self.handle = self._handlers.popleft()
+
+    def handle_in_session(self, data: bytes):
+        """Handle package in session."""
+        if self._session is not None:
+            self._session.handle(data)
 
     @staticmethod
     def get_init_seq(max_seq_number: int) -> int:
@@ -585,12 +602,9 @@ class ConnectionToClient(HalfConnection):
         super().__init__(address, node)
         self._max_seq_number = 1 << self.seq_size * 8
         self._send_seq = self.get_init_seq(self._max_seq_number)
-
         self.conn_id_size = 0
         self.send_conn_id = b''
-        self._handlers = deque([self.handle_alg,
-                                self.handle_asym,
-                                self.handle_alg,
+        self._handlers = deque([self.handle_asym,
                                 self.handle_mac])
 
     @in_queue('node.client_request_queue')
@@ -608,8 +622,9 @@ class ConnectionToClient(HalfConnection):
             )
 
         """
+        self.process_syn = super().process_syn
         buf = BytesIO(request)
-        buf.read(TYPE_SIZE)
+        buf.seek(TYPE_SIZE)
         try:
             # Connection ID
             size = buf.read(1)
@@ -634,21 +649,21 @@ class ConnectionToClient(HalfConnection):
             max_size = buf.read(PACKET_SIZE_LEN)
             max_size = (int.from_bytes(max_size, BYTEORDER)
                         - TYPE_SIZE - self.seq_size - mac_key.digest_size)
-            if max_size == 0:
+            if max_size <= 0:
                 raise ValueError("Invalid node packet size")
             self.max_packet_size = max_size
         except ValueError:
             # Close the connection
             self.close()
             return
-
         # Acknowledge
         self.send_ack()
-        self.process_syn = super().process_syn
+
+    def process(self, request: bytes):
+        """Call process_syn(request)."""
         self.process = MethodType(
             in_queue('node.client_request_queue')(Connection.process), self)
-
-    process = process_syn
+        self.process_syn(request)
 
     def send_ack(self):
         """Called by process_syn to send ACK for SYN.
@@ -669,6 +684,7 @@ class ConnectionToClient(HalfConnection):
         # Connection ID
         self.send_conn_id = ((self.conn_id_size - 1).to_bytes() +
                              self.random_bytes(self.conn_id_size - 1))
+        self.finish = super().finish
         buf.write(self.send_conn_id)
         # Protocol version
         ver = self.node.version
@@ -676,7 +692,7 @@ class ConnectionToClient(HalfConnection):
         buf.write(ver)
         # Sequence number size
         buf.write(self.seq_size.to_bytes())
-        # Max node packet size
+        # Max UDP packet size
         buf.write(self.node.max_packet_size.to_bytes(
             PACKET_SIZE_LEN, BYTEORDER))
         # Check packet size
@@ -698,6 +714,7 @@ class ConnectionToClient(HalfConnection):
         packages == (kdf_alg, cipher_alg, send_key)
 
         """
+        self.handle = self.handle_alg
         try:
             # Key exchange
             asym_alg = self._alg_buf.popleft()
@@ -713,7 +730,7 @@ class ConnectionToClient(HalfConnection):
             cipher_key = cipher.from_bytes(
                 self.kdf.derive(shared_key, cipher.key_size))
 
-        except ValueError:
+        except (IndexError, ValueError):
             # Close the connection
             self.close()
             return
@@ -726,22 +743,26 @@ class ConnectionToClient(HalfConnection):
 
     def handle_mac(self, key: bytes):
         """Handle key for message authentication."""
+        self.handle = self.handle_in_session
         try:
             self.mac_key = self.get_mac(
                 self._alg_buf.popleft()).from_bytes(key)
-        except ValueError:
+        except (IndexError, ValueError):
             # Close the connection
             self.close()
             return
-        self.max_packet_size = (self.max_packet_size +
-                                self.digest_key.digest_size -
-                                self.mac_key.digest_size)
+        self.max_packet_size += (self.digest_key.digest_size -
+                                 self.mac_key.digest_size)
 
         # Establish the session
-        self.node.establish_session(self)
+        self._session = self.node.establish_session(self)
         # Close but not finish the connection
         self.finish = lambda: None
         self.close()
+
+    def finish(self):
+        """Do nothing if SYN message is not received."""
+        self._is_finished = True
 
     def close(self):
         """Close the connection."""
@@ -763,10 +784,8 @@ class ConnectionToServer(HalfConnection):
         self._send_seq: int = None
         self.send_conn_id = ((self.conn_id_size - 1).to_bytes() +
                              self.random_bytes(self.conn_id_size - 1))
-
         self._temp_key = None
         self._handlers = deque([self.handle_alg,
-                                self.handle_alg,
                                 self.handle_asym])
 
     @in_queue('node.server_request_queue')
@@ -783,6 +802,7 @@ class ConnectionToServer(HalfConnection):
         )
 
         """
+        super().setup()
         buf = BytesIO()
         # ReqType
         buf.write(ReqType.SYN)
@@ -828,6 +848,7 @@ class ConnectionToServer(HalfConnection):
         )
 
         """
+        self.process_ack = super().process_ack
         try:
             # Verify MAC
             mac_key = self.mac_key
@@ -853,7 +874,7 @@ class ConnectionToServer(HalfConnection):
             max_size = buf.read(PACKET_SIZE_LEN)
             max_size = (int.from_bytes(max_size, BYTEORDER)
                         - TYPE_SIZE - self.seq_size - mac_key.digest_size)
-            if max_size == 0:
+            if max_size <= 0:
                 raise ValueError("Invalid node packet size")
         except ValueError:
             # Close the connection
@@ -862,14 +883,14 @@ class ConnectionToServer(HalfConnection):
         self._max_seq_number = 1 << self.seq_size * 8
         self._send_seq = self.get_init_seq(self._max_seq_number)
         self.max_packet_size = max_size
-
         # Key exchange
         self.send_asym()
-        self.process_ack = super().process_ack
+
+    def process(self, request: bytes):
+        """Call process_ack(request)."""
         self.process = MethodType(
             in_queue('node.server_request_queue')(Connection.process), self)
-
-    process = process_ack
+        self.process_ack(request)
 
     get_exchange = staticmethod(asymmetric.get_client_exchange)
 
@@ -885,13 +906,15 @@ class ConnectionToServer(HalfConnection):
         send_key = secret.public_bytes()
         self.asym_keys = (secret, send_key, None)
         # Reset sending buffer
-        self._send_buf = deque()
+        self._send_buf.clear()
         alg = bytes(alg, ENCODING)
         # Send packages
         self.send_packages((alg, send_key))
 
     def handle_asym(self, recv_key: bytes):
         """Handle asymmetric key for key exchange."""
+        self.handle = self.handle_in_session
+        self.process_ack = self.process_mac_ack
         try:
             # Key derivation function
             self.kdf = self.get_kdf(self._alg_buf.popleft()).generate()
@@ -902,15 +925,13 @@ class ConnectionToServer(HalfConnection):
             shared_key = secret.exchange(recv_key)
             self.cipher_key = cipher.from_bytes(
                 self.kdf.derive(shared_key, cipher.key_size))
-        except ValueError:
+        except (IndexError, ValueError):
             # Close the connection
             self.close()
             return
         self.asym_keys = (secret, send_key, recv_key)
-
         # Send MAC package
         self.send_mac()
-        self.process_ack = self.process_mac_ack
 
     def send_mac(self):
         """Send key for message authentication.
@@ -930,12 +951,12 @@ class ConnectionToServer(HalfConnection):
         super().process_ack(request)
         if not self._send_buf:
             # MAC key was sent successfully
+            self.process_ack = super().process_ack
             self.mac_key = self._temp_key
-            self.max_packet_size = (self.max_packet_size +
-                                    self.digest_key.digest_size -
-                                    self.mac_key.digest_size)
+            self.max_packet_size += (self.digest_key.digest_size -
+                                     self.mac_key.digest_size)
             # Establish the session
-            self.node.establish_session(self)
+            self._session = self.node.establish_session(self)
             # Close but not finish the connection
             self.finish = lambda: None
             self.close()
@@ -1006,8 +1027,6 @@ class BaseSession(Connection):
         Maximum available size for a node packet to send.
     - seq_size : int
         Byte length of sequence numbers receving.
-    - self._handlers : deque[typing.Callable[[bytes], None]]
-        Package handler buffer.
 
     - asym_keys : tuple[asymmetric.AsymmetricSecret, bytes, bytes]
         Secret key, public key sent and public key received.
@@ -1043,7 +1062,7 @@ class BaseSession(Connection):
         self._recv_seq = conn.recv_seq
         self._max_seq_number = conn.max_seq_number
         self._send_seq = conn.send_seq
-        # Keys
+        # Security
         self.asym_keys = conn.asym_keys
         self.cipher_key = conn.cipher_key
         self.digest_key = conn.digest_key
@@ -1144,11 +1163,11 @@ class Node(UDPServer):
     timeout: Real = 1
     retries = 6
     # Algorithms
-    digest_alg = 'sha3_256'
+    digest_alg = 'sha256'
     key_exchange_alg = 'x25519'
     cipher_alg = 'aes256'
-    mac_alg = 'hmac-sha3_256'
-    kdf_alg = 'hkdf_expand-md5'
+    mac_alg = 'hmac-sha256'
+    kdf_alg = 'hkdf_extract-md5'
 
     def __init__(
         self,
@@ -1215,7 +1234,7 @@ class Node(UDPServer):
                 for con in self.sessions.values():
                     self.socket.sendto(b'', con.address)
                 # Reset time to send keepalive packet
-                self.__keepalive_send_time = time() + self.keepalive_interval
+                self.__keepalive_send_time = now + self.keepalive_interval
 
             # Retransmission
             for con in self.retrans_cons:
@@ -1238,17 +1257,21 @@ class Node(UDPServer):
                     if request:
                         con.process(request)
                     return
-        # New connection
-        self.establish_conn_to_client(request, target_address)
+        if request:
+            # New connection
+            self.establish_conn_to_client(request, target_address)
 
-    def connect(self, address: Address):
+    def connect(
+            self, address: Address) -> ConnectionToClient:
         """New connection to server."""
         conn = self.ServerClass(address, self)
         with self.group_lock:
             self.servers[address] = conn
         conn.start()
+        return conn
 
-    def establish_conn_to_client(self, request: bytes, addr: Address):
+    def establish_conn_to_client(
+            self, request: bytes, addr: Address) -> ConnectionToClient:
         """New connection from client, called by process_request()."""
         if request[:TYPE_SIZE] == ReqType.SYN:
             conn = self.ClientClass(addr, self)
@@ -1256,13 +1279,15 @@ class Node(UDPServer):
             self.clients[addr] = conn
             conn.start()
             conn.process(request)
+            return conn
 
-    def establish_session(self, conn: HalfConnection):
+    def establish_session(self, conn: HalfConnection) -> BaseSession:
         """Establish a new session, called by HalfConnection methods."""
         con = self.SessionClass.from_connection(conn)
         with self.group_lock:
             self.sessions[conn.address] = con
         con.start()
+        return con
 
     def close(self):
         """Shutdown and clean up."""

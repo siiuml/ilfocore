@@ -129,7 +129,7 @@ class AESKey(SymmetricKey):
     @classmethod
     def generate(cls) -> Self:
         """Generate AES key."""
-        return cls(random(cls.key_size), random(16))
+        return cls(random(cls.key_size - 16), random(16))
 
 
 class AES128Key(AESKey):
@@ -137,7 +137,7 @@ class AES128Key(AESKey):
     """AES-128 key."""
 
     name = 'aes128'
-    key_size = 16
+    key_size = 32
 
 
 class AES192Key(AESKey):
@@ -145,7 +145,7 @@ class AES192Key(AESKey):
     """AES-192 key."""
 
     name = 'aes192'
-    key_size = 24
+    key_size = 40
 
 
 class AES256Key(AESKey):
@@ -153,7 +153,7 @@ class AES256Key(AESKey):
     """AES-256 key."""
 
     name = 'aes256'
-    key_size = 32
+    key_size = 48
 
 
 class AES512Key(AESKey):
@@ -161,7 +161,7 @@ class AES512Key(AESKey):
     """AES-512 key."""
 
     name = 'aes512'
-    key_size = 64
+    key_size = 80
 
 
 cipher_algorithms = {
