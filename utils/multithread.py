@@ -13,6 +13,8 @@ from functools import wraps
 from queue import Queue
 from typing import Callable
 
+do_nothing = lambda *args, **kwargs: None
+
 
 def call_forever(queue: Queue):
     """Run in another thread to call functions.

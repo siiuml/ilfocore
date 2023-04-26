@@ -31,7 +31,7 @@ from .constants import (
     ReqType
 )
 from .lib import asymmetric, authentication, cipher, kdf
-from .utils.multithread import call_forever, in_queue
+from .utils.multithread import call_forever, do_nothing, in_queue
 
 
 Packet = namedtuple('Packet', ['seq', 'data'])
@@ -128,28 +128,19 @@ class Connection(metaclass=ABCMeta):
         # Lock
         self._send_buf_lock = Lock()
 
-        # Multi-threading
-        if self.multithreaded:
-            self._queue: Queue[bytes | None] = Queue()
-            self.thread = Thread(target=call_forever,
-                                 args=(self._queue,))
-
     def start(self):
-        """Start the connection thread after instance initialized.
+        """Call setup().
 
-        May be overriden for single-threading.
+        Overriden by SessionClass.
 
         """
-        if self.multithreaded:
-            self.thread.start()
-
         # Call to setup
         self.setup()
 
     def setup(self):
         """Setup, called by start().
 
-        May be overriden.
+        Overriden by ClientClass.
 
         """
 
@@ -164,7 +155,7 @@ class Connection(metaclass=ABCMeta):
         """Finish the connection completely, called by close().
         Send EOT message to inform the other node.
 
-        Overriden by ClientClass.
+        Overriden by ClientClass and ServerClass.
 
         """
         self._is_finished = True
@@ -173,13 +164,11 @@ class Connection(metaclass=ABCMeta):
         self.node.socket.sendto(data, self.address)
 
     def stop(self):
-        """Stop the connection thread, called by close().
+        """Called by close().
 
-        May be overriden.
+        Overriden by SessionClass.
 
         """
-        if self.multithreaded:
-            self._queue.put_nowait(None)
 
     def close(self):
         """Close the connection.
@@ -358,6 +347,8 @@ class Connection(metaclass=ABCMeta):
         if request[TYPE_SIZE: TYPE_SIZE + self.conn_id_size
                    ] != self.recv_conn_id:
             # New connection
+            self._is_finished = True
+            self.finish = do_nothing
             self.close()
             self.node.establish_conn_to_client(request, self.address)
 
@@ -434,6 +425,8 @@ class Connection(metaclass=ABCMeta):
                 self._send_seq += 1
                 if (seq := self._send_seq) < self._max_seq_number:
                     seq = seq.to_bytes(self.seq_size, BYTEORDER)
+                else:
+                    raise NotImplementedError
                 packet = ReqType.ENQ + seq + packet
                 packet += self.mac_key.digest(packet)
                 self._send_buf.append(Packet(seq, packet))
@@ -468,7 +461,8 @@ class Connection(metaclass=ABCMeta):
         """
         if self._retries < self.node.retries:
             with self._send_buf_lock:
-                _, packet = self._send_buf[0]
+                if self._send_buf:
+                    _, packet = self._send_buf[0]
             self.node.socket.sendto(packet, self.address)
             self._retries += 1
             self.update_deadline()
@@ -479,6 +473,8 @@ class Connection(metaclass=ABCMeta):
 class HalfConnection(Connection):
 
     """Unestablished session."""
+
+    multithreaded = True
 
     def __init__(self, address, node):
         super().__init__(address, node)
@@ -516,6 +512,12 @@ class HalfConnection(Connection):
 
         """
         self.handle = self.handle_alg
+
+    retransmit = in_queue('_queue')(Connection.retransmit)
+
+    def finish(self):
+        """Do nothing if the first message have not been accepted."""
+        self._is_finished = True
 
     def check_version(self):
         """Check protocol version of client.
@@ -595,7 +597,6 @@ class ConnectionToClient(HalfConnection):
 
     """Unestablished session to server node."""
 
-    multithreaded = True
     seq_size = 4
 
     def __init__(self, address: Address, node):
@@ -606,9 +607,20 @@ class ConnectionToClient(HalfConnection):
         self.send_conn_id = b''
         self._handlers = deque([self.handle_asym,
                                 self.handle_mac])
+        if self.multithreaded:
+            self._queue: Queue[bytes | None] = node.client_request_queue
 
-    @in_queue('node.client_request_queue')
-    def process_syn(self, request: bytes):
+    def process_init(self, request: bytes):
+        """Process initial message."""
+        self.process_syn = do_nothing
+        self.process = MethodType(
+            in_queue('_queue')(Connection.process), self)
+        self.process_hello(request)
+
+    process = process_init
+
+    @in_queue('_queue')
+    def process_hello(self, request: bytes):
         """Process SYN message.
 
         request == (
@@ -622,7 +634,6 @@ class ConnectionToClient(HalfConnection):
             )
 
         """
-        self.process_syn = super().process_syn
         buf = BytesIO(request)
         buf.seek(TYPE_SIZE)
         try:
@@ -656,14 +667,10 @@ class ConnectionToClient(HalfConnection):
             # Close the connection
             self.close()
             return
+        self.process_syn = super().process_syn
         # Acknowledge
         self.send_ack()
-
-    def process(self, request: bytes):
-        """Call process_syn(request)."""
-        self.process = MethodType(
-            in_queue('node.client_request_queue')(Connection.process), self)
-        self.process_syn(request)
+        self.finish = MethodType(Connection.finish, self)
 
     def send_ack(self):
         """Called by process_syn to send ACK for SYN.
@@ -684,7 +691,6 @@ class ConnectionToClient(HalfConnection):
         # Connection ID
         self.send_conn_id = ((self.conn_id_size - 1).to_bytes() +
                              self.random_bytes(self.conn_id_size - 1))
-        self.finish = super().finish
         buf.write(self.send_conn_id)
         # Protocol version
         ver = self.node.version
@@ -757,12 +763,8 @@ class ConnectionToClient(HalfConnection):
         # Establish the session
         self._session = self.node.establish_session(self)
         # Close but not finish the connection
-        self.finish = lambda: None
+        self.finish = do_nothing
         self.close()
-
-    def finish(self):
-        """Do nothing if SYN message is not received."""
-        self._is_finished = True
 
     def close(self):
         """Close the connection."""
@@ -787,8 +789,10 @@ class ConnectionToServer(HalfConnection):
         self._temp_key = None
         self._handlers = deque([self.handle_alg,
                                 self.handle_asym])
+        if self.multithreaded:
+            self._queue: Queue[bytes | None] = node.server_request_queue
 
-    @in_queue('node.server_request_queue')
+    @in_queue('_queue')
     def setup(self):
         """Send SYN message at first to start the connection.
 
@@ -827,14 +831,19 @@ class ConnectionToServer(HalfConnection):
         buf.write(mac)
         # Send SYN message
         packet = buf.getvalue()
-        # No send() calling during this period, so no lock acquiring now
-        self._send_buf.appendleft(Packet(None, packet))
-        self.node.socket.sendto(buf.getvalue(), self.address)
-        self.node.retrans_cons.add(self)
-        self.update_deadline()
+        self.node.socket.sendto(packet, self.address)
 
-    @in_queue('node.server_request_queue')
-    def process_ack(self, request: bytes):
+    def process_init(self, request: bytes):
+        """Process initial message."""
+        self.process_ack = do_nothing
+        self.process = MethodType(
+            in_queue('_queue')(Connection.process), self)
+        self.process_hello(request)
+
+    process = process_init
+
+    @in_queue('_queue')
+    def process_hello(self, request: bytes):
         """Process ACK message.
 
         request == (
@@ -848,8 +857,13 @@ class ConnectionToServer(HalfConnection):
         )
 
         """
-        self.process_ack = super().process_ack
         try:
+            # Check request type
+            if (req_type := request[:TYPE_SIZE]) != ReqType.ACK:
+                if req_type == ReqType.SYN:
+                    self.close()
+                    self.node.establish_conn_to_client(request, self.address)
+                raise ValueError("Invaild request type")
             # Verify MAC
             mac_key = self.mac_key
             index = -mac_key.digest_size
@@ -857,10 +871,8 @@ class ConnectionToServer(HalfConnection):
             dig = mac_key.digest(msg)
             if not compare_digest(mac, dig):
                 raise ValueError("Request not authentic")
-            # Check request type
             buf = BytesIO(msg)
-            if buf.read(TYPE_SIZE) != ReqType.ACK:
-                raise ValueError("Invaild request type")
+            buf.seek(TYPE_SIZE)
             # Connection ID
             size = buf.read(1)
             self.recv_conn_id = size + buf.read(size[0])
@@ -877,20 +889,16 @@ class ConnectionToServer(HalfConnection):
             if max_size <= 0:
                 raise ValueError("Invalid node packet size")
         except ValueError:
-            # Close the connection
-            self.close()
+            self.process = self.process_init
             return
+        self._send_buf.clear()
         self._max_seq_number = 1 << self.seq_size * 8
         self._send_seq = self.get_init_seq(self._max_seq_number)
         self.max_packet_size = max_size
         # Key exchange
+        self.process_ack = super().process_ack
         self.send_asym()
-
-    def process(self, request: bytes):
-        """Call process_ack(request)."""
-        self.process = MethodType(
-            in_queue('node.server_request_queue')(Connection.process), self)
-        self.process_ack(request)
+        self.finish = MethodType(Connection.finish, self)
 
     get_exchange = staticmethod(asymmetric.get_client_exchange)
 
@@ -958,7 +966,7 @@ class ConnectionToServer(HalfConnection):
             # Establish the session
             self._session = self.node.establish_session(self)
             # Close but not finish the connection
-            self.finish = lambda: None
+            self.finish = do_nothing
             self.close()
 
     def close(self):
@@ -999,7 +1007,6 @@ class BaseSession(Connection):
     - process()
     - stop()
 
-    - send_nak()
     - close()
     - process_capture(req_type: bytes, buf: io.BytesIO)
     - process_request(req_type: bytes, buf: io.BytesIO)
@@ -1067,13 +1074,37 @@ class BaseSession(Connection):
         self.cipher_key = conn.cipher_key
         self.digest_key = conn.digest_key
         self.mac_key = conn.mac_key
+        # Multi-threading
+        if self.multithreaded:
+            self._queue: Queue[bytes | None] = Queue()
+            self.thread = Thread(target=call_forever,
+                                 args=(self._queue,))
 
     @classmethod
     def from_connection(cls, conn: HalfConnection) -> Self:
         """Establish a session from a connection."""
         return cls(conn)
 
+    def start(self):
+        """Start the session thread after instance initialized.
+
+        May be overriden for single-threading.
+
+        """
+        if self.multithreaded:
+            self.thread.start()
+        super().start()
+
     process = in_queue('_queue')(Connection.process)
+
+    def stop(self):
+        """Stop the session thread, called by close().
+
+        May be overriden.
+
+        """
+        if self.multithreaded:
+            self._queue.put_nowait(None)
 
     def close(self):
         """Close session, interrupt thread if multi-threaded."""
@@ -1157,8 +1188,8 @@ class Node(UDPServer):
     has_queue_to_server = True
     has_queue_to_client = True
     # Keepalive
-    keepalive_interval: Real = 30
-    keepalive_timeout: Real = 300
+    keepalive_interval: Real = 15
+    keepalive_timeout: Real = 30
     # Retransmission
     timeout: Real = 1
     retries = 6
@@ -1257,12 +1288,11 @@ class Node(UDPServer):
                     if request:
                         con.process(request)
                     return
-        if request:
+        if request and request[:TYPE_SIZE] == ReqType.SYN:
             # New connection
             self.establish_conn_to_client(request, target_address)
 
-    def connect(
-            self, address: Address) -> ConnectionToClient:
+    def connect(self, address: Address) -> ConnectionToClient:
         """New connection to server."""
         conn = self.ServerClass(address, self)
         with self.group_lock:
@@ -1273,13 +1303,12 @@ class Node(UDPServer):
     def establish_conn_to_client(
             self, request: bytes, addr: Address) -> ConnectionToClient:
         """New connection from client, called by process_request()."""
-        if request[:TYPE_SIZE] == ReqType.SYN:
-            conn = self.ClientClass(addr, self)
-            # Lock acquired by caller process_request()
-            self.clients[addr] = conn
-            conn.start()
-            conn.process(request)
-            return conn
+        conn = self.ClientClass(addr, self)
+        # Lock acquired by caller process_request()
+        self.clients[addr] = conn
+        conn.start()
+        conn.process(request)
+        return conn
 
     def establish_session(self, conn: HalfConnection) -> BaseSession:
         """Establish a new session, called by HalfConnection methods."""
