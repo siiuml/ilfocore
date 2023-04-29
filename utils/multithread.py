@@ -36,17 +36,23 @@ def in_queue(queue: Queue | str):
         then the item will be put in vars(self)[queue].
 
         """
-        @wraps(func)
-        def decorated(*args, **kwargs):
-            """Called in another thread."""
-            nonlocal queue
-            if isinstance(queue, str):
-                attrs = queue.split('.')
-                queue = args[0]
-                for name in attrs:
-                    queue = getattr(queue, name)
-            queue.put((func, args, kwargs))
-        if func.__doc__ is not None:
-            decorated.__doc__ += '\n\n' + func.__doc__
+        if isinstance(queue, str):
+            attrs = queue.split('.')
+            self = None
+
+            @wraps(func)
+            def decorated(*args, **kwargs):
+                """Method called in another thread."""
+                nonlocal attrs, queue, self
+                if self is not args[0]:
+                    queue = (self := args[0])
+                    for name in attrs:
+                        queue = getattr(queue, name)
+                queue.put((func, args, kwargs))
+        else:
+            @wraps(func)
+            def decorated(*args, **kwargs):
+                """Function called in another thread."""
+                queue.put((func, args, kwargs))
         return decorated
     return in_queue_

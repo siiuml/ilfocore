@@ -13,6 +13,7 @@ from abc import ABCMeta, abstractmethod
 from collections import deque, namedtuple
 from hmac import compare_digest
 from io import BytesIO
+from operator import ge, lt
 from queue import Queue
 from secrets import randbelow, token_bytes
 from socketserver import UDPServer
@@ -426,7 +427,7 @@ class Connection(metaclass=ABCMeta):
                 if (seq := self._send_seq) < self._max_seq_number:
                     seq = seq.to_bytes(self.seq_size, BYTEORDER)
                 else:
-                    raise NotImplementedError
+                    raise NotImplementedError("No sequence number available")
                 packet = ReqType.ENQ + seq + packet
                 packet += self.mac_key.digest(packet)
                 self._send_buf.append(Packet(seq, packet))
@@ -831,7 +832,12 @@ class ConnectionToServer(HalfConnection):
         buf.write(mac)
         # Send SYN message
         packet = buf.getvalue()
+        # No send() calling during this period, so no lock acquiring now
+        self._send_buf.appendleft(Packet(None, packet))
         self.node.socket.sendto(packet, self.address)
+        self.update_deadline()
+        with self.node.group_lock:
+            self.node.retrans_cons.add(self)
 
     def process_init(self, request: bytes):
         """Process initial message."""
@@ -861,8 +867,20 @@ class ConnectionToServer(HalfConnection):
             # Check request type
             if (req_type := request[:TYPE_SIZE]) != ReqType.ACK:
                 if req_type == ReqType.SYN:
-                    self.close()
-                    self.node.establish_conn_to_client(request, self.address)
+                    # Identify the SYN message of session
+                    buf = BytesIO(request)
+                    buf.seek(TYPE_SIZE)
+                    recv = buf.read(buf.read(1)[0])
+                    send = self.send_conn_id[1:]
+                    if recv[-1] % 2 == send[-1] % 2:
+                        op = ge
+                    else:
+                        op = lt
+                    if op(int.from_bytes(recv, BYTEORDER),
+                          int.from_bytes(send, BYTEORDER)):
+                        self.close()
+                        self.node.establish_conn_to_client(request,
+                                                           self.address)
                 raise ValueError("Invaild request type")
             # Verify MAC
             mac_key = self.mac_key

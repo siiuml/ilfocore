@@ -11,7 +11,7 @@ Safe node of ilfocore, providing authentic transmission support.
 
 from collections import defaultdict
 from typing import Iterable
-from . import udpnode
+from . import udpnode as udpnode
 from .constants import Address, ENCODING
 from .lib import signature
 from .utils.multithread import in_queue
