@@ -13,7 +13,6 @@ from abc import ABCMeta, abstractmethod
 from collections import deque, namedtuple
 from hmac import compare_digest
 from io import BytesIO
-from operator import ge, lt
 from queue import Queue
 from secrets import randbelow, token_bytes
 from socketserver import UDPServer
@@ -77,7 +76,7 @@ class Connection(metaclass=ABCMeta):
     - self._recv_buf : io.BytesIO
     - self.__not_packing : bool
     - self.__size_left : int
-    - self._is_finished : bool
+    - self.is_finished : bool
     - self._send_buf : deque[Packet]
     - self._send_buf_lock : threading.Lock
     - self.deadline : Real
@@ -117,7 +116,7 @@ class Connection(metaclass=ABCMeta):
         # The size of the rest of a node package
         self.__size_left = 0
         # If the connection is finished, then it won't handle any packages
-        self._is_finished = False
+        self.is_finished = False
 
         # For sending
         # Datagram packets for retransmission
@@ -159,7 +158,7 @@ class Connection(metaclass=ABCMeta):
         Overriden by ClientClass and ServerClass.
 
         """
-        self._is_finished = True
+        self.is_finished = True
         data = ReqType.EOT + self.send_conn_id
         data = data + self.mac_key.digest(data)
         self.node.socket.sendto(data, self.address)
@@ -302,7 +301,7 @@ class Connection(metaclass=ABCMeta):
                     return
                 # Handle package
                 self.handle(package)
-                if self._is_finished:
+                if self.is_finished:
                     break
 
     def process_ack(self, request: bytes):
@@ -348,7 +347,7 @@ class Connection(metaclass=ABCMeta):
         if request[TYPE_SIZE: TYPE_SIZE + self.conn_id_size
                    ] != self.recv_conn_id:
             # New connection
-            self._is_finished = True
+            self.is_finished = True
             self.finish = do_nothing
             self.close()
             self.node.establish_conn_to_client(request, self.address)
@@ -518,7 +517,7 @@ class HalfConnection(Connection):
 
     def finish(self):
         """Do nothing if the first message have not been accepted."""
-        self._is_finished = True
+        self.is_finished = True
 
     def check_version(self):
         """Check protocol version of client.
@@ -870,14 +869,19 @@ class ConnectionToServer(HalfConnection):
                     # Identify the SYN message of session
                     buf = BytesIO(request)
                     buf.seek(TYPE_SIZE)
-                    recv = buf.read(buf.read(1)[0])
-                    send = self.send_conn_id[1:]
-                    if recv[-1] % 2 == send[-1] % 2:
-                        op = ge
-                    else:
-                        op = lt
-                    if op(int.from_bytes(recv, BYTEORDER),
-                          int.from_bytes(send, BYTEORDER)):
+                    recv = int.from_bytes(buf.read(buf.read(1)[0]),
+                                          BYTEORDER, signed=True)
+                    send = int.from_bytes(self.send_conn_id[1:],
+                                          BYTEORDER, signed=True)
+                    # If (recv < 0) != (send < 0),
+                    # then accept received SYN if recv >= send
+                    # If (recv < 0) == (send < 0),
+                    # then accept received SYN if recv < send
+                    recv_is_less = recv < send
+                    send_is_neg = send < 0
+                    if (send_is_neg and recv_is_less
+                        if recv < 0 else
+                        send_is_neg or recv_is_less):
                         self.close()
                         self.node.establish_conn_to_client(request,
                                                            self.address)
