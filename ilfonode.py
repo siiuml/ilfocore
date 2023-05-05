@@ -133,8 +133,6 @@ class BaseSession(udpnode.BaseSession):
 
     def close(self):
         """Close session, interrupt thread if multi-threaded."""
-        import traceback
-        print(f"closed by {traceback.extract_stack()[-2][2]}")
         if self.sig_key in self.node.session_groups:
             group = self.node.session_groups[self.pub_key]
             if self.address in group:
