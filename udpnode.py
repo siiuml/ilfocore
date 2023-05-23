@@ -1,4 +1,4 @@
-# Copyright (c) 2022 SiumLhahah
+# Copyright (c) 2022-2023 SiumLhahah
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -1361,7 +1361,6 @@ class Node(UDPServer):
                 for con in group.values():
                     con.finish()
                     con.stop()
-                    con.thread.join()
 
     def handle_request(self, *args):
         """Use module self.SessionClass.handle instead."""

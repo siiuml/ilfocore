@@ -48,10 +48,11 @@ if __name__ == "__main__":
     t2 = Thread(target=node2.serve_forever)
     t1.start()
     t2.start()
-    # Let node1 connect to node2
+    # Let nodes connect to each other
     node1.connect(addr2)
+    node2.connect(addr1)
     # Wait for the session to get established
-    sleep(1)
+    sleep(5)
     # Send message to node2
     node1.sendto(b'hello', node2.pub_key)
     # Out: ('127.0.0.1', 9998): Recv b'hello'
