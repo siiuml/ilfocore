@@ -42,6 +42,4 @@ class ReqType(bytes, Enum):
     SYN = b'\x16'
 
 
-# Types
 Address = tuple[str, int]
-Real = int | float

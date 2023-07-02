@@ -10,6 +10,7 @@ Safe node of ilfocore, providing authentic transmission support.
 """
 
 from collections import defaultdict
+from io import BufferedIOBase
 from typing import Iterable
 from . import udpnode
 from .constants import Address, ENCODING
@@ -26,8 +27,8 @@ class BaseSession(udpnode.BaseSession):
 
     - start()
     - close()
-    - send(package: bytes)
-    - send_packages(packages: typing.Iterable[bytes])
+    - send(package: bytes) -> last_seq
+    - send_packages(packages: typing.Iterable[bytes]) -> last_seq
 
     Methods that may be overridden:
 
@@ -76,9 +77,10 @@ class BaseSession(udpnode.BaseSession):
                             sig_key.public_key.to_bytes(),
                             sig_key.sign(self.recv_conn_id + alg + send_key)))
 
-    def handle_sig_alg(self, alg: bytes):
+    def handle_sig_alg(self, buf: BufferedIOBase):
         """Handle signature algorithm."""
         self.handle = self.handle_sig_key
+        alg = buf.read()
         try:
             self.pub_key = (str(alg, ENCODING), None)
         except UnicodeDecodeError:
@@ -88,9 +90,10 @@ class BaseSession(udpnode.BaseSession):
 
     handle = handle_sig_alg
 
-    def handle_sig_key(self, key: bytes):
+    def handle_sig_key(self, buf: BufferedIOBase):
         """Handle public key for signature."""
         self.handle = self.handle_sig
+        key = buf.read()
         try:
             alg, _ = self.pub_key
             self.sig_key = self.node.get_verify(alg).from_bytes(key)
@@ -101,9 +104,10 @@ class BaseSession(udpnode.BaseSession):
             self.close()
             return
 
-    def handle_sig(self, sig: bytes):
+    def handle_sig(self, buf: BufferedIOBase):
         """Handle the signature."""
         self.handle = super().handle
+        sig = buf.read()
         try:
             secret, _, recv_key = self.asym_keys
             alg = secret.name
@@ -119,15 +123,11 @@ class BaseSession(udpnode.BaseSession):
     def setup_common(self):
         """Start to handle common messages.
 
-        May be overriden.
+        Should be overriden like this:
 
-        """
-        self.handle = self.handle_common
-
-    def handle_common(self, data: bytes):
-        """Handle a common package.
-
-        May be overriden.
+            ...
+            self.handle = self.handle_common_method
+            ...
 
         """
 
@@ -151,6 +151,11 @@ class Node(udpnode.Node):
     - __init__(sig_key, server_address, SessionClass)
     - serve_forever(poll_interval=0.5)
     - close()
+    - send_packages_to(packages: typing.Iterable[bytes],
+                       target_sig_key: tuple[str, bytes]
+                       ) -> dict[BaseSession, last_seq: int]
+    - sendto(package: bytes, target_sig_key: tuple[str, bytes]
+             ) -> dict[BaseSession, last_seq: int]
 
     Instance variables:
 
@@ -179,20 +184,22 @@ class Node(udpnode.Node):
         ] = defaultdict(dict)
         super().__init__(server_address, SessionClass, bind_and_activate)
 
-    def send_packages_to(self, packages: Iterable[bytes],
-                         target_sig_key: tuple[str, bytes]):
+    def send_packages_to(
+            self, packages: Iterable[bytes], target_sig_key: tuple[str, bytes]
+    ) -> dict[BaseSession, int]:
         """Send packages to target nodes."""
         with self.group_lock:
-            sessions = self.session_groups.get(target_sig_key)
-            if sessions is None:
-                return
-            sessions = tuple(sessions.values())
-        for session in sessions:
-            session.send_packages(packages)
+            cons = self.session_groups.get(target_sig_key)
+            if cons is None:
+                return None
+            cons = list(cons.values())
+        return {con: con.send_packages(packages) for con in cons}
 
-    def sendto(self, package: bytes, target_sig_key: tuple[str, bytes]):
+    def sendto(
+            self, package: bytes, target_sig_key: tuple[str, bytes]
+    ) -> dict[BaseSession, int]:
         """Send package to target nodes."""
-        self.send_packages_to((package,), target_sig_key)
+        return self.send_packages_to((package,), target_sig_key)
 
     get_sign = staticmethod(signature.get_sign)
     get_verify = staticmethod(signature.get_verify)

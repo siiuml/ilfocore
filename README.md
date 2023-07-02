@@ -28,8 +28,12 @@ from ilfocore import BaseSession, Node, signature
 
 
 class MySession(BaseSession):
-    def handle_common(self, data):
+    def setup_common(self):
+        self.handle = self.handle_common
+
+    def handle_common(self, buf):
         # Print the data received
+        data = buf.read()
         print(f"{self.node.server_address}: Recv {data}")
 
 
