@@ -258,7 +258,7 @@ class Connection(metaclass=ABCMeta):
             return recv_buf
 
     def verify_mac(self, buf: BytesIO) -> bool:
-        """Verify MAC, return the message buffer."""
+        """Verify MAC."""
         req = buf.getvalue()
         index = -self.mac_key.digest_size
         msg, mac = req[:index], req[index:]
@@ -381,7 +381,7 @@ class Connection(metaclass=ABCMeta):
             self.is_finished = True
             self.finish = do_nothing
             self.close()
-            self.node.establish_conn_to_client(buf.getvalue(), self.address)
+            self.node.establish_conn_to_client(buf, self.address)
 
     def process_eot(self, buf: BytesIO):
         """Called by process_request() to process EOT message."""
@@ -1072,7 +1072,7 @@ class BaseSession(Connection):
     Methods for the caller:
 
     - from_connection(conn: HalfConnection)
-    - process(request: bytes)
+    - process(request: io.BytesIO)
     - start()
     - finish()
     - stop()

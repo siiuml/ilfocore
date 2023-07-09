@@ -32,7 +32,6 @@ class BaseSession(udpnode.BaseSession):
 
     Methods that may be overridden:
 
-    - handle_common(data: bytes)
     - setup_common()
 
     # if not multi-threaded for sessions
