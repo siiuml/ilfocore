@@ -16,7 +16,7 @@ from io import BufferedIOBase, BytesIO
 from queue import Queue
 from secrets import randbelow, token_bytes
 from socketserver import UDPServer
-from threading import Lock, Thread
+from threading import RLock, Thread
 from time import monotonic as time
 from types import MethodType
 from typing import Iterable, Self
@@ -30,7 +30,8 @@ from .constants import (
     ReqType
 )
 from .lib import asymmetric, authentication, cipher, kdf
-from .utils.multithread import call_forever, do_nothing, in_queue
+from .utils import do_nothing, write_integral
+from .utils.multithread import call_forever, in_queue
 
 
 class Connection(metaclass=ABCMeta):
@@ -40,16 +41,16 @@ class Connection(metaclass=ABCMeta):
     Methods for the caller:
 
     - __init__(address: Address, node: Node)
-    - process(buf: io.BytesIO)
+    - process(buf: BytesIO)
     - retransmit(now : int)
     - send(package: bytes) -> last_seq
-    - send_packages(packages: typing.Iterable[bytes]) -> last_seq
+    - send_packages(packages: Iterable[bytes]) -> last_seq
 
     Methods that may be overridden:
 
     - handle(buf: BytesIO)
-    - process_request(req_type: bytes, buf: io.BytesIO)
-    - process_capture(req_type: bytes, buf: io.BytesIO)
+    - process_request(req_type: bytes, buf: BytesIO)
+    - process_capture(req_type: bytes, buf: BytesIO)
     - finish()
     - close()
     - update_deadline()
@@ -65,12 +66,12 @@ class Connection(metaclass=ABCMeta):
     - self._send_pkts : list[bytes]
     - self._deadline : float
     - self._retries : int
-    - self._recv_pkts: list[io.BytesIO]
-    - self._recv_buf : io.BytesIO
+    - self._recv_pkts: list[BytesIO]
+    - self._recv_buf : BytesIO
     - self.__not_packing : bool
     - self.__size_left : int
     - self.is_finished : bool
-    - self._send_lock : threading.Lock
+    - self._send_lock : RLock
 
     - self.version: bytes
     - self.max_packet_size : int
@@ -121,7 +122,7 @@ class Connection(metaclass=ABCMeta):
         self.is_finished = False
 
         # Lock
-        self._send_lock = Lock()
+        self._send_lock = RLock()
 
     def start(self):
         """Call setup().
@@ -221,7 +222,7 @@ class Connection(metaclass=ABCMeta):
             if not (size_len := self.__size_left):
                 # Not packing the size
                 # Brand new package
-                size_len = buf.read(1)[0]
+                size_len = int.from_bytes(buf.read(1))
                 if size_len < 128:
                     self.__size_left = size_len
                     is_packing_size = False
@@ -438,18 +439,8 @@ class Connection(metaclass=ABCMeta):
             # Encrypt data
             pkg = self.cipher_key.encrypt(pkg)
             size = len(pkg)
-            if size < 128:
-                size = size.to_bytes()
-            else:
-                for size_len in range(1, 256):
-                    if size < 1 << size_len * 8:
-                        break
-                else:
-                    raise AssertionError
-                size = size.to_bytes(size_len, BYTEORDER)
-                size_len = (size_len + 128).to_bytes()
-                size = size_len + size
-            pkgBuf.write(size + pkg)
+            write_integral(size, pkgBuf, BYTEORDER)
+            pkgBuf.write(pkg)
         pkgBuf.seek(0)
         pktBuf = BytesIO(ReqType.ENQ)
         size = self.max_packet_size
@@ -684,7 +675,7 @@ class ConnectionToClient(HalfConnection):
             init_seq +          # initial sequence number
             reservation +       # compatible with extra bytes
             mac                 # MAC
-            )
+        )
 
         """
         try:
@@ -693,11 +684,11 @@ class ConnectionToClient(HalfConnection):
             self.conn_id_size = size[0] + 1
             self.recv_conn_id = size + buf.read(size[0])
             # Check protocol version
-            size = int.from_bytes(buf.read(ALG_SIZE_LEN), BYTEORDER)
+            size = buf.read(ALG_SIZE_LEN)[0]
             self.version = buf.read(size)
             self.check_version()
             # Verify MAC
-            size = int.from_bytes(buf.read(ALG_SIZE_LEN), BYTEORDER)
+            size = buf.read(ALG_SIZE_LEN)[0]
             alg = str(buf.read(size), ENCODING)
             mac_key = self.get_digest(alg).generate()
             self.mac_key = mac_key
@@ -740,7 +731,7 @@ class ConnectionToClient(HalfConnection):
             max_packet_size +   # max node packet size
             init_seq +          # initial sequence number
             mac                 # MAC
-            )
+        )
 
         """
         buf = BytesIO()
@@ -752,7 +743,7 @@ class ConnectionToClient(HalfConnection):
         buf.write(self.send_conn_id)
         # Protocol version
         ver = self.node.version
-        buf.write(len(ver).to_bytes(ALG_SIZE_LEN, BYTEORDER))
+        buf.write(len(ver).to_bytes(ALG_SIZE_LEN))
         buf.write(ver)
         # Sequence number size
         buf.write(self.send_seq_size.to_bytes())
@@ -878,14 +869,14 @@ class ConnectionToServer(HalfConnection):
         buf.write(self.send_conn_id)
         # Protocol version
         ver = self.node.version
-        buf.write(len(ver).to_bytes(ALG_SIZE_LEN, BYTEORDER))
+        buf.write(len(ver).to_bytes(ALG_SIZE_LEN))
         buf.write(ver)
         # Hash algorithm
         alg = self.node.digest_alg
         self.mac_key = self.get_digest(alg).generate()
         self.digest_key = self.mac_key
         alg = bytes(alg, ENCODING)
-        buf.write(len(alg).to_bytes(ALG_SIZE_LEN, BYTEORDER))
+        buf.write(len(alg).to_bytes(ALG_SIZE_LEN))
         buf.write(alg)
         # Max datagram packet size
         buf.write(self.node.max_packet_size.to_bytes(PACKET_SIZE_LEN,
@@ -960,7 +951,7 @@ class ConnectionToServer(HalfConnection):
             size = buf.read(1)
             self.recv_conn_id = size + buf.read(size[0])
             # Check protocol version
-            size = int.from_bytes(buf.read(ALG_SIZE_LEN), BYTEORDER)
+            size = buf.read(ALG_SIZE_LEN)[0]
             self.version = buf.read(size)
             self.check_version()
             # Sequence number size
@@ -1072,13 +1063,13 @@ class BaseSession(Connection):
     Methods for the caller:
 
     - from_connection(conn: HalfConnection)
-    - process(request: io.BytesIO)
+    - process(request: BytesIO)
     - start()
     - finish()
     - stop()
     - close()
     - send(package: bytes) -> last_seq
-    - send_packages(packages: typing.Iterable[bytes]) -> last_seq
+    - send_packages(packages: Iterable[bytes]) -> last_seq
 
     Methods that should be overriden:
     - handle(data: bytes)
@@ -1095,8 +1086,8 @@ class BaseSession(Connection):
     - stop()
 
     - close()
-    - process_capture(req_type: bytes, buf: io.BytesIO)
-    - process_request(req_type: bytes, buf: io.BytesIO)
+    - process_capture(req_type: bytes, buf: BytesIO)
+    - process_request(req_type: bytes, buf: BytesIO)
 
     Class variables:
     - multithreaded : bool
@@ -1253,7 +1244,7 @@ class Node(UDPServer):
     - retrans_cons: set[Connection]
         Connections that need retransmission.
 
-    - group_lock : threading.Lock
+    - group_lock : RLock
         To lock groups, such as sessions and dead_cons.
 
     - __keepalive_send_time : float
@@ -1301,7 +1292,7 @@ class Node(UDPServer):
         self.servers: dict[Address, ConnectionToServer] = {}
         self.retrans_cons: set[Connection] = set()
         self.dead_cons: set[Connection] = set()
-        self.group_lock = Lock()
+        self.group_lock = RLock()
 
         self.__keepalive_send_time = time() + self.keepalive_interval
         self.__keepalive_deadline = time() + self.keepalive_timeout

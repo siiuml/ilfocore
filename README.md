@@ -24,7 +24,9 @@ Example
 ```
 from threading import Thread
 from time import sleep
-from ilfocore import BaseSession, Node, signature
+from ilfocore import signature
+from ilfocore.constants import Address
+from ilfocore.ilfonode import BaseSession, Node
 
 
 class MySession(BaseSession):
@@ -43,8 +45,8 @@ if __name__ == "__main__":
     key1 = signature.get_sign(alg).generate()
     key2 = signature.get_sign(alg).generate()
     # Initialize nodes
-    addr1 = ('127.0.0.1', 9999)
-    addr2 = ('127.0.0.1', 9998)
+    addr1 = Address('127.0.0.1', 9999)
+    addr2 = Address('127.0.0.1', 9998)
     node1 = Node(key1, addr1, MySession)
     node2 = Node(key2, addr2, MySession)
     # Start threads

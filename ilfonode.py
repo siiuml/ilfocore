@@ -13,22 +13,22 @@ from collections import defaultdict
 from io import BufferedIOBase
 from typing import Iterable
 from . import udpnode
-from .constants import Address, ENCODING
-from .lib import signature
+from .constants import ENCODING, Address, Key
+from .lib.signature import PrivateKey, PublicKey, get_sign, get_verify
 from .utils.multithread import in_queue
 
 
 class BaseSession(udpnode.BaseSession):
 
-    """Base safe session class.
-    Authentic session to the other node.
+    """Basic safe session class.
+    Authentic session to the target node.
 
     Methods for the caller:
 
     - start()
     - close()
     - send(package: bytes) -> last_seq
-    - send_packages(packages: typing.Iterable[bytes]) -> last_seq
+    - send_packages(packages: Iterable[bytes]) -> last_seq
 
     Methods that may be overridden:
 
@@ -41,14 +41,14 @@ class BaseSession(udpnode.BaseSession):
 
     - send_nak()
     - close()
-    - process_capture(req_type: bytes, buf: io.BytesIO)
-    - process_request(req_type: bytes, buf: io.BytesIO)
+    - process_capture(req_type: bytes, buf: BytesIO)
+    - process_request(req_type: bytes, buf: BytesIO)
 
     Instance variables:
 
-    - pub_key : tuple[str, bytes]
-        The identity of other node.
-    - sig_key : signature.PublicKey
+    - pub_key : Key
+        The identity of target.
+    - sig_key : PublicKey
         The PublicKey object.
     - ...
 
@@ -57,8 +57,8 @@ class BaseSession(udpnode.BaseSession):
     """
 
     def __init__(self, conn):
-        self.pub_key: tuple[str, bytes] = None
-        self.sig_key: signature.PublicKey = None
+        self.pub_key: Key = None
+        self.sig_key: PublicKey = None
         super().__init__(conn)
 
     @in_queue('_queue')
@@ -81,7 +81,7 @@ class BaseSession(udpnode.BaseSession):
         self.handle = self.handle_sig_key
         alg = buf.read()
         try:
-            self.pub_key = (str(alg, ENCODING), None)
+            self.pub_key = Key(str(alg, ENCODING), None)
         except UnicodeDecodeError:
             # Close the session
             self.close()
@@ -94,10 +94,10 @@ class BaseSession(udpnode.BaseSession):
         self.handle = self.handle_sig
         key = buf.read()
         try:
-            alg, _ = self.pub_key
+            alg = self.pub_key.algorithm
             self.sig_key = self.node.get_verify(alg).from_bytes(key)
             alg = self.sig_key.name
-            self.pub_key = (alg, key)
+            self.pub_key = Key(alg, key)
         except ValueError:
             # Close the session
             self.close()
@@ -150,16 +150,17 @@ class Node(udpnode.Node):
     - __init__(sig_key, server_address, SessionClass)
     - serve_forever(poll_interval=0.5)
     - close()
-    - send_packages_to(packages: typing.Iterable[bytes],
-                       target_sig_key: tuple[str, bytes]
+    - send_packages_to(packages: Iterable[bytes], target_pub_key: Key
                        ) -> dict[BaseSession, last_seq: int]
-    - sendto(package: bytes, target_sig_key: tuple[str, bytes]
+    - sendto(package: bytes, target_pub_key: Key
              ) -> dict[BaseSession, last_seq: int]
 
     Instance variables:
 
-    - sig_key : signature.PrivateKey
-        The identity of a node of ilfocore.
+    - pub_key : Key
+        The identity of local node.
+    - sig_key : PrivateKey
+        The PrivateKey object.
     - ...
 
     See udpnode.Node.__doc__ for more information.
@@ -170,35 +171,32 @@ class Node(udpnode.Node):
 
     def __init__(
         self,
-        sig_key: signature.PrivateKey,
+        signature_key: PrivateKey,
         server_address: Address,
         SessionClass: type[BaseSession],
         bind_and_activate=True
     ):
-        self.sig_key = sig_key
-        self.pub_key = (self.sig_key.name,
-                        self.sig_key.public_key.to_bytes())
+        self.sig_key = signature_key
+        self.pub_key = Key(self.sig_key.name,
+                           self.sig_key.public_key.to_bytes())
         self.session_groups: defaultdict[
-            tuple[str, bytes], dict[Address, SessionClass]
-        ] = defaultdict(dict)
+            Key, dict[Address, SessionClass]] = defaultdict(dict)
         super().__init__(server_address, SessionClass, bind_and_activate)
 
-    def send_packages_to(
-            self, packages: Iterable[bytes], target_sig_key: tuple[str, bytes]
-    ) -> dict[BaseSession, int]:
+    def send_packages_to(self, packages: Iterable[bytes],
+                         target_pub_key: Key) -> dict[BaseSession, int]:
         """Send packages to target nodes."""
         with self.group_lock:
-            cons = self.session_groups.get(target_sig_key)
+            cons = self.session_groups.get(target_pub_key)
             if cons is None:
                 return None
             cons = list(cons.values())
         return {con: con.send_packages(packages) for con in cons}
 
-    def sendto(
-            self, package: bytes, target_sig_key: tuple[str, bytes]
-    ) -> dict[BaseSession, int]:
+    def sendto(self, package: bytes,
+               target_pub_key: Key) -> dict[BaseSession, int]:
         """Send package to target nodes."""
-        return self.send_packages_to((package,), target_sig_key)
+        return self.send_packages_to((package,), target_pub_key)
 
-    get_sign = staticmethod(signature.get_sign)
-    get_verify = staticmethod(signature.get_verify)
+    get_sign = staticmethod(get_sign)
+    get_verify = staticmethod(get_verify)
