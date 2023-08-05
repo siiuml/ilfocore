@@ -38,3 +38,18 @@ def read_integral(buf: BufferedIOBase, byteorder='big') -> int:
     if size < 128:
         return size
     return int.from_bytes(buf.read(size - 128), byteorder)
+
+
+def write_with_size(data: bytes, buf: BufferedIOBase, byteorder='big') -> int:
+    """Write data size and data into buffer.
+
+    Returns the number of bytes written.
+
+    """
+    size = write_integral(len(data), buf, byteorder)
+    return size + buf.write(data)
+
+
+def read_by_size(buf: BufferedIOBase, byteorder='big') -> bytes:
+    """Read data from buffer by its size indicated in the buffer."""
+    return buf.read(read_integral(buf, byteorder))

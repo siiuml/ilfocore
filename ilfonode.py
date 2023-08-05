@@ -10,11 +10,12 @@ Safe node of ilfocore, providing authentic transmission support.
 """
 
 from collections import defaultdict
-from io import BufferedIOBase
+from io import BufferedIOBase, BytesIO
 from typing import Iterable
 from . import udpnode
-from .constants import ENCODING, Address, Key
+from .constants import BYTEORDER, ENCODING, Address, Key
 from .lib.signature import PrivateKey, PublicKey, get_sign, get_verify
+from .utils import write_with_size
 from .utils.multithread import in_queue
 
 
@@ -69,12 +70,15 @@ class BaseSession(udpnode.BaseSession):
 
         """
         sig_key = self.node.sig_key
+        buf = BytesIO()
         secret, send_key, _ = self.asym_keys
         alg = secret.name
-        alg = len(alg).to_bytes() + bytes(alg, ENCODING)
+        buf.write(self.recv_conn_id)
+        write_with_size(bytes(alg, ENCODING), buf, BYTEORDER)
+        buf.write(send_key)
         self.send_packages((bytes(sig_key.name, ENCODING),
                             sig_key.public_key.to_bytes(),
-                            sig_key.sign(self.recv_conn_id + alg + send_key)))
+                            sig_key.sign(buf.getvalue())))
 
     def handle_sig_alg(self, buf: BufferedIOBase):
         """Handle signature algorithm."""
@@ -93,8 +97,8 @@ class BaseSession(udpnode.BaseSession):
         """Handle public key for signature."""
         self.handle = self.handle_sig
         key = buf.read()
+        alg = self.pub_key.algorithm
         try:
-            alg = self.pub_key.algorithm
             self.sig_key = self.node.get_verify(alg).from_bytes(key)
             alg = self.sig_key.name
             self.pub_key = Key(alg, key)
@@ -107,11 +111,14 @@ class BaseSession(udpnode.BaseSession):
         """Handle the signature."""
         self.handle = super().handle
         sig = buf.read()
+        buf = BytesIO()
+        secret, _, recv_key = self.asym_keys
+        alg = secret.name
+        buf.write(self.send_conn_id)
         try:
-            secret, _, recv_key = self.asym_keys
-            alg = secret.name
-            alg = len(alg).to_bytes() + bytes(alg, ENCODING)
-            self.sig_key.verify(sig, self.send_conn_id + alg + recv_key)
+            write_with_size(bytes(alg, ENCODING), buf, BYTEORDER)
+            buf.write(recv_key)
+            self.sig_key.verify(sig, buf.getvalue())
         except ValueError:
             # Close the session
             self.close()

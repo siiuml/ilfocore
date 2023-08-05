@@ -12,8 +12,7 @@ Multi-threading utilities.
 from functools import wraps
 from queue import Queue
 from typing import Callable
-
-do_nothing = lambda *args, **kwargs: None
+from threading import _RLock
 
 
 def call_forever(queue: Queue):
@@ -56,3 +55,51 @@ def in_queue(queue: Queue | str):
                 queue.put((func, args, kwargs))
         return decorated
     return in_queue_
+
+
+class ReadLock:
+
+    """Simple read lock class."""
+
+    def __init__(self, wlock: _RLock):
+        self._cnt = 0
+        self._wlock = wlock
+        self._block = wlock._block
+
+    def acquire(self, blocking=True, timeout=-1) -> int:
+        """Acquire the lock."""
+        no_rlock_acquired = not self._cnt
+        self._cnt += 1
+        if no_rlock_acquired or self._wlock._owner:
+            return self._block.acquire(blocking, timeout)
+        return 1
+
+    __enter__ = acquire
+
+    def release(self):
+        """Release the lock."""
+        self._cnt = cnt = self._cnt - 1 if self._cnt else 0
+        if not cnt:
+            self._block.release()
+
+    def __exit__(self, *args):
+        self.release()
+
+
+class ReadWriteLock:
+
+    """Simple read-write lock class."""
+
+    def __init__(self):
+        self._wlock = wlock = _RLock()
+        self._rlock = ReadLock(wlock)
+
+    @property
+    def rlock(self) -> ReadLock:
+        """Return the read lock."""
+        return self._rlock
+
+    @property
+    def wlock(self) -> _RLock:
+        """Return the write lock."""
+        return self._wlock

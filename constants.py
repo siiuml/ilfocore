@@ -9,16 +9,11 @@ Constants for ilfocore.
 
 """
 
+from collections import namedtuple
 from enum import Enum
 
 # Request type size
 TYPE_SIZE = 1
-
-# The size of a 1-byte integer
-# which determines the size of
-# a algorithm name that not
-# greater than 255
-ALG_SIZE_LEN = 1
 
 # The size of a 2-byte integer
 # which determines the size of
@@ -42,4 +37,14 @@ class ReqType(bytes, Enum):
     SYN = b'\x16'
 
 
-Address = tuple[str, int]
+Address = namedtuple('Address', ('host', 'port'))
+Address.host: str
+Address.host.__doc__ = """Host."""
+Address.port: int
+Address.port.__doc__ = """Port."""
+
+Key = namedtuple('Key', ('algorithm', 'key'))
+Key.algorithm: str
+Key.algorithm.__doc__ = """Algorithm of the key."""
+Key.key: bytes
+Key.algorithm.__doc__ = """Key bytes."""

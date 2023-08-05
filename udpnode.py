@@ -21,7 +21,6 @@ from time import monotonic as time
 from types import MethodType
 from typing import Iterable, Self
 from .constants import (
-    ALG_SIZE_LEN,
     BYTEORDER,
     ENCODING,
     PACKET_SIZE_LEN,
@@ -30,7 +29,13 @@ from .constants import (
     ReqType
 )
 from .lib import asymmetric, authentication, cipher, kdf
-from .utils import do_nothing, write_integral
+from .utils import (
+    do_nothing,
+    read_by_size,
+    read_integral,
+    write_integral,
+    write_with_size
+)
 from .utils.multithread import call_forever, in_queue
 
 
@@ -434,22 +439,19 @@ class Connection(metaclass=ABCMeta):
         node packet sent.
 
         """
-        pkgBuf = BytesIO()
+        pkg_buf = BytesIO()
         for pkg in packages:
             # Encrypt data
-            pkg = self.cipher_key.encrypt(pkg)
-            size = len(pkg)
-            write_integral(size, pkgBuf, BYTEORDER)
-            pkgBuf.write(pkg)
-        pkgBuf.seek(0)
-        pktBuf = BytesIO(ReqType.ENQ)
+            write_with_size(self.cipher_key.encrypt(pkg), pkg_buf, BYTEORDER)
+        pkg_buf.seek(0)
+        pkt_buf = BytesIO(ReqType.ENQ)
         size = self.max_packet_size
         max_seq = self._max_seq_number
         mac_key = self.mac_key
         seq = None
         with self._send_lock:
-            while data := pkgBuf.read(size):
-                pktBuf.seek(1)
+            while data := pkg_buf.read(size):
+                pkt_buf.seek(1)
                 if self.is_finished:
                     return
                 seq = self._send_seq + len(self._send_pkts)
@@ -459,12 +461,12 @@ class Connection(metaclass=ABCMeta):
                     self.close()
                     self.node.connect(self.address)
                     return
-                pktBuf.write(seq_bytes)
-                pktBuf.write(data)
-                pktBuf.write(mac_key.digest(pktBuf.getvalue()))
-                self._send_pkts.append(data := pktBuf.getvalue())
+                pkt_buf.write(seq_bytes)
+                pkt_buf.write(data)
+                pkt_buf.write(mac_key.digest(pkt_buf.getvalue()))
+                self._send_pkts.append(data := pkt_buf.getvalue())
                 self.node.socket.sendto(data, self.address)
-                pktBuf.truncate(1)
+                pkt_buf.truncate(1)
         self.update_deadline()
         with self.node.group_lock:
             self.node.retrans_cons.add(self)
@@ -684,12 +686,10 @@ class ConnectionToClient(HalfConnection):
             self.conn_id_size = size[0] + 1
             self.recv_conn_id = size + buf.read(size[0])
             # Check protocol version
-            size = buf.read(ALG_SIZE_LEN)[0]
-            self.version = buf.read(size)
+            self.version = read_by_size(buf, BYTEORDER)
             self.check_version()
             # Verify MAC
-            size = buf.read(ALG_SIZE_LEN)[0]
-            alg = str(buf.read(size), ENCODING)
+            alg = str(read_by_size(buf, BYTEORDER), ENCODING)
             mac_key = self.get_digest(alg).generate()
             self.mac_key = mac_key
             self.digest_key = mac_key
@@ -742,11 +742,9 @@ class ConnectionToClient(HalfConnection):
                              self.random_bytes(self.conn_id_size - 1))
         buf.write(self.send_conn_id)
         # Protocol version
-        ver = self.node.version
-        buf.write(len(ver).to_bytes(ALG_SIZE_LEN))
-        buf.write(ver)
+        write_with_size(self.node.version, buf, BYTEORDER)
         # Sequence number size
-        buf.write(self.send_seq_size.to_bytes())
+        write_integral(self.send_seq_size, buf, BYTEORDER)
         # Max UDP packet size
         buf.write(self.node.max_packet_size.to_bytes(
             PACKET_SIZE_LEN, BYTEORDER))
@@ -868,16 +866,12 @@ class ConnectionToServer(HalfConnection):
         # Connection ID
         buf.write(self.send_conn_id)
         # Protocol version
-        ver = self.node.version
-        buf.write(len(ver).to_bytes(ALG_SIZE_LEN))
-        buf.write(ver)
+        write_with_size(self.node.version, buf, BYTEORDER)
         # Hash algorithm
         alg = self.node.digest_alg
         self.mac_key = self.get_digest(alg).generate()
         self.digest_key = self.mac_key
-        alg = bytes(alg, ENCODING)
-        buf.write(len(alg).to_bytes(ALG_SIZE_LEN))
-        buf.write(alg)
+        write_with_size(bytes(alg, ENCODING), buf, BYTEORDER)
         # Max datagram packet size
         buf.write(self.node.max_packet_size.to_bytes(PACKET_SIZE_LEN,
                                                      BYTEORDER))
@@ -951,11 +945,10 @@ class ConnectionToServer(HalfConnection):
             size = buf.read(1)
             self.recv_conn_id = size + buf.read(size[0])
             # Check protocol version
-            size = buf.read(ALG_SIZE_LEN)[0]
-            self.version = buf.read(size)
+            self.version = read_by_size(buf, BYTEORDER)
             self.check_version()
             # Sequence number size
-            size = buf.read(1)[0]
+            size = read_integral(buf, BYTEORDER)
             self._recv_seq_size = size
             # Max node packet size
             max_size = buf.read(PACKET_SIZE_LEN)
@@ -1325,27 +1318,25 @@ class Node(UDPServer):
     def service_actions(self):
         """Keepalive and retransmission."""
         now = time()
-        with self.group_lock:
-            if now >= self.__keepalive_send_time:
-                if now >= self.__keepalive_deadline:
+        if now >= self.__keepalive_send_time:
+            if now >= self.__keepalive_deadline:
+                with self.group_lock:
                     # Close all dead connections
                     for con in self.dead_cons:
                         con.close()
                     # Reset status
-                    self.dead_cons = set(
-                        (self.sessions |
-                         self.servers |
-                         self.clients).values())
-                    # Reset deadline
-                    self.__keepalive_deadline = time(
-                    ) + self.keepalive_timeout
-                # Send keepalive packets
-                # To established sessions only
-                for con in self.sessions.values():
-                    self.socket.sendto(b'', con.address)
-                # Reset time to send keepalive packet
-                self.__keepalive_send_time = now + self.keepalive_interval
-
+                    self.dead_cons = set((self.sessions
+                                          | self.servers
+                                          | self.clients).values())
+                # Reset deadline
+                self.__keepalive_deadline = time() + self.keepalive_timeout
+            # Send keepalive packets
+            # To established sessions only
+            for con in self.sessions.values():
+                self.socket.sendto(b'', con.address)
+            # Reset time to send keepalive packet
+            self.__keepalive_send_time = now + self.keepalive_interval
+        with self.group_lock:
             # Retransmission
             for con in self.retrans_cons.copy():
                 con.retransmit(now)
@@ -1353,7 +1344,7 @@ class Node(UDPServer):
     def get_request(self) -> tuple[bytes, Address]:
         """Get the request from the socket."""
         request, client_addr = self.socket.recvfrom(self.max_packet_size)
-        return request, client_addr[: 2]
+        return request, Address(*client_addr[: 2])
 
     def process_request(self, request: bytes, target_address: Address):
         """Process one request."""
