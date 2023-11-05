@@ -2,7 +2,6 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-
 """
 ilfocore.utils
 
@@ -11,45 +10,66 @@ Ilfocore utilities.
 """
 
 from io import BufferedIOBase
+from math import ceil
 
 do_nothing = lambda *args, **kwargs: None
 
 
-def write_integral(num: int, buf: BufferedIOBase, byteorder='big') -> int:
+def pack_integral(num: int | None, byteorder='big') -> bytes:
+    """Pack an integral into bytes."""
+    if num is None:
+        return b'\xff'
+    if num < 0b10000000:
+        return num.to_bytes()
+    return (((size := ceil(num.bit_length() / 8)) + 0b10000000).to_bytes()
+            + num.to_bytes(size, byteorder))
+
+
+def write_integral(num: int | None, buf: BufferedIOBase, byteorder='big'
+                   ) -> int:
     """Write an integral into buffer.
 
     Returns the number of bytes written.
 
     """
-    if num < 128:
-        return buf.write(num.to_bytes())
-    for size in range(1, 256):
-        if num < 1 << size * 8:
-            break
-    else:
-        raise AssertionError
-    return (buf.write((size + 128).to_bytes())
-            + buf.write(num.to_bytes(size, byteorder)))
+    return buf.write(pack_integral(num, byteorder))
 
 
-def read_integral(buf: BufferedIOBase, byteorder='big') -> int:
+def read_integral(buf: BufferedIOBase, byteorder='big', *, not_none=True
+                  ) -> int | None:
     """Read an integral from buffer."""
-    size = int.from_bytes(buf.read(1))
-    if size < 128:
+    if size_bytes := buf.read(1):
+        size = size_bytes[0]
+    else:
+        raise ValueError
+    if size < 0x80:
         return size
-    return int.from_bytes(buf.read(size - 128), byteorder)
+    if not_none or size < 0xff:
+        return int.from_bytes(buf.read(size - 128), byteorder)
+    return None
 
 
-def write_with_size(data: bytes, buf: BufferedIOBase, byteorder='big') -> int:
+def pack_with_size(data: bytes | None, byteorder='big') -> bytes:
+    """Pack data with its size."""
+    if data is None:
+        return b'\xff'
+    return pack_integral(len(data), byteorder) + data
+
+
+def write_with_size(data: bytes | None, buf: BufferedIOBase, byteorder='big'
+                    ) -> int:
     """Write data size and data into buffer.
 
     Returns the number of bytes written.
 
     """
-    size = write_integral(len(data), buf, byteorder)
-    return size + buf.write(data)
+    return buf.write(pack_with_size(data, byteorder))
 
 
-def read_by_size(buf: BufferedIOBase, byteorder='big') -> bytes:
+def read_by_size(buf: BufferedIOBase, byteorder='big', *, not_none=True
+                 ) -> bytes | None:
     """Read data from buffer by its size indicated in the buffer."""
-    return buf.read(read_integral(buf, byteorder))
+    size = read_integral(buf, byteorder)
+    if not_none or size is not None:
+        return buf.read(size)
+    return None

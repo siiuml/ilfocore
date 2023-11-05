@@ -37,14 +37,20 @@ class ReqType(bytes, Enum):
     SYN = b'\x16'
 
 
-Address = namedtuple('Address', ('host', 'port'))
+Address = namedtuple('Address', ['host', 'port'])
 Address.host: str
 Address.host.__doc__ = """Host."""
 Address.port: int
 Address.port.__doc__ = """Port."""
 
-Key = namedtuple('Key', ('algorithm', 'key'))
-Key.algorithm: str
+
+class Key(namedtuple('Key', ['algorithm', 'key'])):
+
+    __slots__ = ()
+
+    def __new__(cls, algorithm: str, key: bytes):
+        return super(Key, cls).__new__(cls, algorithm.lower(), key)
+
+
 Key.algorithm.__doc__ = """Algorithm of the key."""
-Key.key: bytes
-Key.algorithm.__doc__ = """Key bytes."""
+Key.key.__doc__ = """Key bytes."""

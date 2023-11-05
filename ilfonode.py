@@ -10,13 +10,12 @@ Safe node of ilfocore, providing authentic transmission support.
 """
 
 from collections import defaultdict
-from io import BufferedIOBase, BytesIO
+from io import BufferedReader, BytesIO
 from typing import Iterable
-from . import udpnode
-from .constants import BYTEORDER, ENCODING, Address, Key
+from . import udpnode as udpnode
+from .constants import ENCODING, Address, Key
 from .lib.signature import PrivateKey, PublicKey, get_sign, get_verify
 from .utils import write_with_size
-from .utils.multithread import in_queue
 
 
 class BaseSession(udpnode.BaseSession):
@@ -62,7 +61,7 @@ class BaseSession(udpnode.BaseSession):
         self.sig_key: PublicKey = None
         super().__init__(conn)
 
-    @in_queue('_queue')
+    @udpnode.in_queue
     def setup(self):
         """Setup to send signature.
 
@@ -74,15 +73,14 @@ class BaseSession(udpnode.BaseSession):
         secret, send_key, _ = self.asym_keys
         alg = secret.name
         buf.write(self.recv_conn_id)
-        write_with_size(bytes(alg, ENCODING), buf, BYTEORDER)
+        write_with_size(bytes(alg, ENCODING), buf)
         buf.write(send_key)
         self.send_packages((bytes(sig_key.name, ENCODING),
                             sig_key.public_key.to_bytes(),
                             sig_key.sign(buf.getvalue())))
 
-    def handle_sig_alg(self, buf: BufferedIOBase):
+    def handle_sig_alg(self, buf: BufferedReader):
         """Handle signature algorithm."""
-        self.handle = self.handle_sig_key
         alg = buf.read()
         try:
             self.pub_key = Key(str(alg, ENCODING), None)
@@ -90,12 +88,12 @@ class BaseSession(udpnode.BaseSession):
             # Close the session
             self.close()
             return
+        self.handle = self.handle_sig_key
 
     handle = handle_sig_alg
 
-    def handle_sig_key(self, buf: BufferedIOBase):
+    def handle_sig_key(self, buf: BufferedReader):
         """Handle public key for signature."""
-        self.handle = self.handle_sig
         key = buf.read()
         alg = self.pub_key.algorithm
         try:
@@ -106,23 +104,24 @@ class BaseSession(udpnode.BaseSession):
             # Close the session
             self.close()
             return
+        self.handle = self.handle_sig
 
-    def handle_sig(self, buf: BufferedIOBase):
+    def handle_sig(self, buf: BufferedReader):
         """Handle the signature."""
-        self.handle = super().handle
         sig = buf.read()
         buf = BytesIO()
         secret, _, recv_key = self.asym_keys
         alg = secret.name
         buf.write(self.send_conn_id)
         try:
-            write_with_size(bytes(alg, ENCODING), buf, BYTEORDER)
+            write_with_size(bytes(alg, ENCODING), buf)
             buf.write(recv_key)
             self.sig_key.verify(sig, buf.getvalue())
         except ValueError:
             # Close the session
             self.close()
             return
+        self.handle = super().handle
         self.node.session_groups[self.pub_key][self.address] = self
         self.setup_common()
 

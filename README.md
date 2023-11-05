@@ -4,7 +4,7 @@ The ilfocore package
 ===================
 
 ```
-Language: Python (>= 3.11)
+Language: Python (>= 3.12)
 ```
 
 The ilfocore package provides basic, stable and authentic transmission support

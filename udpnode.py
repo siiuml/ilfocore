@@ -11,15 +11,16 @@ Node based on UDP.
 
 from abc import ABCMeta, abstractmethod
 from collections import deque
+from collections.abc import Iterable
 from hmac import compare_digest
-from io import BufferedIOBase, BytesIO
+from io import BufferedReader, BytesIO
 from queue import Queue
 from secrets import randbelow, token_bytes
 from socketserver import UDPServer
 from threading import RLock, Thread
 from time import monotonic as time
 from types import MethodType
-from typing import Iterable, Self
+from typing import Self
 from .constants import (
     BYTEORDER,
     ENCODING,
@@ -37,6 +38,8 @@ from .utils import (
     write_with_size
 )
 from .utils.multithread import call_forever, in_queue
+
+in_queue = in_queue('_queue')
 
 
 class Connection(metaclass=ABCMeta):
@@ -101,7 +104,7 @@ class Connection(metaclass=ABCMeta):
 
     multithreaded = False
 
-    def __init__(self, address, node):
+    def __init__(self, address: Address, node: 'Node'):
         self.address = address
         self.node = node
 
@@ -145,7 +148,7 @@ class Connection(metaclass=ABCMeta):
 
         """
 
-    def handle(self, buf: BufferedIOBase):
+    def handle(self, buf: BufferedReader):
         """Handle a package buffer.
 
         Overriden by ClientClass, ServerClass and SessionClass.
@@ -185,7 +188,7 @@ class Connection(metaclass=ABCMeta):
         self.finish()
         self.stop()
 
-    def _parse(self, buf: BytesIO) -> BytesIO | None:
+    def _parse(self, buf: BytesIO) -> BufferedReader | None:
         """Parse node packages which may be like these:
 
             p1 = b'\x02abc'
@@ -241,10 +244,10 @@ class Connection(metaclass=ABCMeta):
                 if written >= size_len:
                     # Got all bytes in need
                     self.__size_left = int.from_bytes(
-                        recv_buf.getvalue(), BYTEORDER)
+                        recv_buf.read(), BYTEORDER)
                     # Start to pack the package
                     recv_buf.seek(0)
-                    recv_buf.truncate(0)
+                    recv_buf.truncate()
                     self.__not_packing = False
                 else:
                     # Continue to pack the size
@@ -261,7 +264,8 @@ class Connection(metaclass=ABCMeta):
             self.__not_packing = True
             self._recv_buf = BytesIO()
             # Return the full package buffer
-            return recv_buf
+            recv_buf.seek(0)
+            return BufferedReader(recv_buf)
 
     def verify_mac(self, buf: BytesIO) -> bool:
         """Verify MAC."""
@@ -292,10 +296,9 @@ class Connection(metaclass=ABCMeta):
 
         if (index := seq - self._recv_seq) < 0:
             return
-        pad_size = index - len(self._recv_pkts)
-        recv_pkts = self._recv_pkts
+        pad_size = index - len(recv_pkts := self._recv_pkts)
         if pad_size >= 0:
-            recv_pkts.extend([None] * pad_size)
+            recv_pkts += [None] * pad_size
             recv_pkts.append(buf)
         else:
             recv_pkts[index] = buf
@@ -322,8 +325,8 @@ class Connection(metaclass=ABCMeta):
                     break
                 # Decrypt package
                 try:
-                    pkg_buf = BytesIO(
-                        self.cipher_key.decrypt(pkg_buf.getvalue()))
+                    pkg_buf = BufferedReader(BytesIO(
+                        self.cipher_key.decrypt(pkg_buf.read())))
                 except ValueError:
                     return
                 if self.is_finished:
@@ -427,8 +430,8 @@ class Connection(metaclass=ABCMeta):
         """Read the request type."""
         self.process_request(buf.read(TYPE_SIZE), buf)
 
-    def send_packages(self, packages: Iterable[bytes]) -> int:
-        """Send a list of node packages.
+    def send(self, data: bytes | Iterable[bytes]) -> int:
+        """Send a node package or a list of node packages.
 
         Encrypt the packages, split the encrypted
         packages into at least one node packets.
@@ -439,10 +442,13 @@ class Connection(metaclass=ABCMeta):
         node packet sent.
 
         """
+        # Encrypt data
         pkg_buf = BytesIO()
-        for pkg in packages:
-            # Encrypt data
-            write_with_size(self.cipher_key.encrypt(pkg), pkg_buf, BYTEORDER)
+        if isinstance(data, bytes):
+            write_with_size(self.cipher_key.encrypt(data), pkg_buf)
+        else:
+            for pkg in data:
+                write_with_size(self.cipher_key.encrypt(pkg), pkg_buf)
         pkg_buf.seek(0)
         pkt_buf = BytesIO(ReqType.ENQ)
         size = self.max_packet_size
@@ -464,22 +470,15 @@ class Connection(metaclass=ABCMeta):
                 pkt_buf.write(seq_bytes)
                 pkt_buf.write(data)
                 pkt_buf.write(mac_key.digest(pkt_buf.getvalue()))
+                pkt_buf.truncate()
                 self._send_pkts.append(data := pkt_buf.getvalue())
                 self.node.socket.sendto(data, self.address)
-                pkt_buf.truncate(1)
         self.update_deadline()
         with self.node.group_lock:
             self.node.retrans_cons.add(self)
         return seq
 
-    def send(self, package: bytes) -> int:
-        """Send a node package.
-
-        Return the sequence number of the last
-        node packet sent.
-
-        """
-        return self.send_packages((package,))
+    send_packages = send
 
     def update_deadline(self):
         """Reset deadline from current time.
@@ -561,7 +560,7 @@ class HalfConnection(Connection):
         """
         self.handle = self.handle_alg
 
-    retransmit = in_queue('_queue')(Connection.retransmit)
+    retransmit = in_queue(Connection.retransmit)
 
     def finish(self):
         """Do nothing if the first message have not been accepted."""
@@ -576,7 +575,7 @@ class HalfConnection(Connection):
         if not self.version.startswith(self.node.version):
             raise ValueError("Protocol version not supported")
 
-    def handle_alg(self, buf: BufferedIOBase):
+    def handle_alg(self, buf: BufferedReader):
         """Handle algorithm package."""
         try:
             self._alg_buf.append(str(buf.read(), ENCODING))
@@ -585,7 +584,7 @@ class HalfConnection(Connection):
             return
         self.handle = self._handlers.popleft()
 
-    def handle_in_session(self, buf: BufferedIOBase):
+    def handle_in_session(self, buf: BufferedReader):
         """Handle package in session."""
         if self._session is not None:
             self._session.handle(buf)
@@ -645,7 +644,7 @@ class ConnectionToClient(HalfConnection):
 
     """Unestablished session to client node."""
 
-    def __init__(self, address: Address, node):
+    def __init__(self, address, node):
         super().__init__(address, node)
         self.conn_id_size = 0
         self.send_conn_id = b''
@@ -657,13 +656,12 @@ class ConnectionToClient(HalfConnection):
     def process_init(self, buf: BytesIO):
         """Process initial message."""
         self.process_syn = do_nothing
-        self.process = MethodType(
-            in_queue(self._queue)(Connection.process), self)
+        self.process = MethodType(in_queue(Connection.process), self)
         self.process_hello(buf)
 
     process = process_init
 
-    @in_queue('_queue')
+    @in_queue
     def process_hello(self, buf: BytesIO):
         """Process SYN message.
 
@@ -686,10 +684,10 @@ class ConnectionToClient(HalfConnection):
             self.conn_id_size = size[0] + 1
             self.recv_conn_id = size + buf.read(size[0])
             # Check protocol version
-            self.version = read_by_size(buf, BYTEORDER)
+            self.version = read_by_size(buf)
             self.check_version()
             # Verify MAC
-            alg = str(read_by_size(buf, BYTEORDER), ENCODING)
+            alg = str(read_by_size(buf), ENCODING)
             mac_key = self.get_digest(alg).generate()
             self.mac_key = mac_key
             self.digest_key = mac_key
@@ -742,9 +740,9 @@ class ConnectionToClient(HalfConnection):
                              self.random_bytes(self.conn_id_size - 1))
         buf.write(self.send_conn_id)
         # Protocol version
-        write_with_size(self.node.version, buf, BYTEORDER)
+        write_with_size(self.node.version, buf)
         # Sequence number size
-        write_integral(self.send_seq_size, buf, BYTEORDER)
+        write_integral(self.send_seq_size, buf)
         # Max UDP packet size
         buf.write(self.node.max_packet_size.to_bytes(
             PACKET_SIZE_LEN, BYTEORDER))
@@ -764,7 +762,7 @@ class ConnectionToClient(HalfConnection):
 
     get_exchange = staticmethod(asymmetric.get_server_exchange)
 
-    def handle_asym(self, buf: BufferedIOBase):
+    def handle_asym(self, buf: BufferedReader):
         """Handle recv_key and send algorithms and send_key for key exchange.
 
         packages == (kdf_alg, cipher_alg, send_key)
@@ -798,7 +796,7 @@ class ConnectionToClient(HalfConnection):
         self.send_packages((kdf_alg, cipher_alg, send_key))
         self.cipher_key = cipher_key
 
-    def handle_mac(self, buf: BufferedIOBase):
+    def handle_mac(self, buf: BufferedReader):
         """Handle key for message authentication."""
         self.handle = self.handle_in_session
         key = buf.read()
@@ -832,7 +830,7 @@ class ConnectionToServer(HalfConnection):
 
     conn_id_size = 16
 
-    def __init__(self, address: Address, node):
+    def __init__(self, address, node):
         super().__init__(address, node)
         self.send_conn_id = ((self.conn_id_size - 1).to_bytes() +
                              self.random_bytes(self.conn_id_size - 1))
@@ -843,7 +841,7 @@ class ConnectionToServer(HalfConnection):
         if self.multithreaded:
             self._queue: Queue[bytes | None] = node.server_request_queue
 
-    @in_queue('_queue')
+    @in_queue
     def setup(self):
         """Send SYN message at first to start the connection.
 
@@ -866,12 +864,12 @@ class ConnectionToServer(HalfConnection):
         # Connection ID
         buf.write(self.send_conn_id)
         # Protocol version
-        write_with_size(self.node.version, buf, BYTEORDER)
+        write_with_size(self.node.version, buf)
         # Hash algorithm
         alg = self.node.digest_alg
         self.mac_key = self.get_digest(alg).generate()
         self.digest_key = self.mac_key
-        write_with_size(bytes(alg, ENCODING), buf, BYTEORDER)
+        write_with_size(bytes(alg, ENCODING), buf)
         # Max datagram packet size
         buf.write(self.node.max_packet_size.to_bytes(PACKET_SIZE_LEN,
                                                      BYTEORDER))
@@ -893,13 +891,12 @@ class ConnectionToServer(HalfConnection):
     def process_init(self, buf: BytesIO):
         """Process initial message."""
         self.process_ack = do_nothing
-        self.process = MethodType(
-            in_queue(self._queue)(Connection.process), self)
+        self.process = MethodType(in_queue(Connection.process), self)
         self.process_hello(buf)
 
     process = process_init
 
-    @in_queue('_queue')
+    @in_queue
     def process_hello(self, buf: BytesIO):
         """Process ACK message.
 
@@ -945,10 +942,10 @@ class ConnectionToServer(HalfConnection):
             size = buf.read(1)
             self.recv_conn_id = size + buf.read(size[0])
             # Check protocol version
-            self.version = read_by_size(buf, BYTEORDER)
+            self.version = read_by_size(buf)
             self.check_version()
             # Sequence number size
-            size = read_integral(buf, BYTEORDER)
+            size = read_integral(buf)
             self._recv_seq_size = size
             # Max node packet size
             max_size = buf.read(PACKET_SIZE_LEN)
@@ -990,7 +987,7 @@ class ConnectionToServer(HalfConnection):
         # Send packages
         self.send_packages((alg, send_key))
 
-    def handle_asym(self, buf: BufferedIOBase):
+    def handle_asym(self, buf: BufferedReader):
         """Handle asymmetric key for key exchange."""
         self.handle = self.handle_in_session
         recv_key = buf.read()
@@ -1167,7 +1164,7 @@ class BaseSession(Connection):
             self.thread.start()
         super().start()
 
-    process = in_queue('_queue')(Connection.process)
+    process = in_queue(Connection.process)
 
     def stop(self):
         """Stop the session thread, called by close().

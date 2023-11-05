@@ -15,8 +15,10 @@ Example
 
 """
 
-from abc import ABCMeta, abstractmethod
+from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from typing import Self
+
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import (
     ed25519,
@@ -32,12 +34,15 @@ from cryptography.hazmat.primitives.serialization import (
     load_der_private_key,
     load_der_public_key
 )
-from .exceptions import AlgorithmError
+
+# from .exceptions import AlgorithmError
 
 
-class SignatureKey(metaclass=ABCMeta):
+class SignatureKey(ABC):
 
     """Key for signature, to sign or to verify."""
+
+    __slots__ = '_key',
 
     def __init__(self, key: object):
         self._key = key
@@ -62,10 +67,32 @@ class SignatureKey(metaclass=ABCMeta):
     def from_bytes(cls, key_bytes: bytes) -> Self:
         """Load key from bytes."""
 
+    def __iter__(self):
+        yield self.name
+        yield self.to_bytes()
+
+    def __eq__(self, other) -> bool:
+        return (self is other
+                or isinstance(other, Iterable) and (*self,) == other)
+
+    def __hash__(self) -> int:
+        return hash(self.to_bytes())
+
+    def __copy__(self) -> Self:
+        return self.__class__.from_bytes(self.to_bytes())
+
+    def __str__(self) -> str:
+        return self.to_bytes().hex()
+
+    def __repr__(self) -> str:
+        return f"<{self.name} key {str(self)}>"
+
 
 class PublicKey(SignatureKey):
 
     """Key to verify."""
+
+    __slots__ = ()
 
     @abstractmethod
     def verify(self, signature: bytes, data: bytes):
@@ -76,9 +103,11 @@ class PrivateKey(SignatureKey):
 
     """Key to sign."""
 
+    __slots__ = '_pub_key',
+
     def __init__(self, pub_key: PublicKey, priv_key: object):
-        self._pub_key = pub_key
         super().__init__(priv_key)
+        self._pub_key = pub_key
 
     @property
     def public_key(self) -> PublicKey:
@@ -102,9 +131,9 @@ class PrivateKey(SignatureKey):
 
 
 class NoSignatureKey(SignatureKey):
-    # pylint: disable=W0223
     """No key for signature."""
 
+    __slots__ = ()
     name = 'none'
 
     def to_bytes(self) -> bytes:
@@ -115,6 +144,8 @@ class NoSignatureKey(SignatureKey):
 class NoVerifyKey(NoSignatureKey, PublicKey):
 
     """No key to verify."""
+
+    __slots__ = ()
 
     def verify(self, signature: bytes, data: bytes):
         """Does nothing."""
@@ -128,6 +159,8 @@ class NoVerifyKey(NoSignatureKey, PublicKey):
 class NoSignKey(NoSignatureKey, PrivateKey):
 
     """No key to sign."""
+
+    __slots__ = ()
 
     def sign(self, data: bytes) -> bytes:
         """Return empty bytes."""
@@ -151,6 +184,7 @@ class Ed25519PublicKey(PublicKey):
 
     """Ed25519 public key."""
 
+    __slots__ = '_pub_bytes',
     name = 'ed25519'
 
     def __init__(self, key, pub_bytes=None):
@@ -188,18 +222,16 @@ class Ed25519PrivateKey(PrivateKey):
 
     """Ed25519 private key."""
 
+    __slots__ = '_priv_bytes',
     name = 'ed25519'
 
     def __init__(self, pub_key, priv_key, priv_bytes=None):
         super().__init__(pub_key, priv_key)
-        if priv_bytes is None:
-            self._priv_bytes = self._key.private_bytes(
-                Encoding.Raw,
-                PrivateFormat.Raw,
-                NoEncryption()
-            )
-        else:
-            self._priv_bytes = priv_bytes
+        self._priv_bytes = self._key.private_bytes(
+            Encoding.Raw,
+            PrivateFormat.Raw,
+            NoEncryption()
+        ) if priv_bytes is None else priv_bytes
 
     def sign(self, data: bytes) -> bytes:
         """Sign the data."""
@@ -232,6 +264,7 @@ class Ed448PublicKey(PublicKey):
 
     """Ed448 public key."""
 
+    __slots__ = '_pub_bytes',
     name = 'ed448'
 
     def __init__(self, key, pub_bytes=None):
@@ -269,6 +302,7 @@ class Ed448PrivateKey(PrivateKey):
 
     """Ed448 private key."""
 
+    __slots__ = '_priv_bytes',
     name = 'ed448'
 
     def __init__(self, pub_key, priv_key, priv_bytes=None):
@@ -313,6 +347,7 @@ class RSAPublicKeySHA256(PublicKey):
 
     """RSA public key."""
 
+    __slots__ = '_pub_bytes',
     name = 'rsa-sha256'
 
     def __init__(self, key, pub_bytes=None):
@@ -354,6 +389,7 @@ class RSAPrivateKeySHA256(PrivateKey):
 
     """RSA private key."""
 
+    __slots__ = '_priv_bytes',
     name = 'rsa-sha256'
 
     def __init__(self, pub_key, priv_key, priv_bytes=None):
@@ -427,11 +463,11 @@ def get_sign(algorithm: str) -> type[PrivateKey]:
     """Get signing class."""
     if sign := sign_algorithms.get(algorithm.lower()):
         return sign
-    raise AlgorithmError("Unsupported signature algorithm")
+    raise AlgorithmError(f"Unsupported signature algorithm {algorithm}")
 
 
 def get_verify(algorithm: str) -> type[PublicKey]:
     """Get verifying class."""
     if verify := verify_algorithms.get(algorithm.lower()):
         return verify
-    raise AlgorithmError("Unsupported signature algorithm")
+    raise AlgorithmError(f"Unsupported signature algorithm {algorithm}")
