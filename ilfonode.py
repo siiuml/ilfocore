@@ -27,8 +27,7 @@ class BaseSession(udpnode.BaseSession):
 
     - start()
     - close()
-    - send(package: bytes) -> last_seq
-    - send_packages(packages: Iterable[bytes]) -> last_seq
+    - send(data: bytes | Iterable[bytes]) -> last_seq
 
     Methods that may be overridden:
 
@@ -75,7 +74,7 @@ class BaseSession(udpnode.BaseSession):
         buf.write(self.recv_conn_id)
         write_with_size(bytes(alg, ENCODING), buf)
         buf.write(send_key)
-        self.send_packages((bytes(sig_key.name, ENCODING),
+        self.send((bytes(sig_key.name, ENCODING),
                             sig_key.public_key.to_bytes(),
                             sig_key.sign(buf.getvalue())))
 
@@ -156,9 +155,7 @@ class Node(udpnode.Node):
     - __init__(sig_key, server_address, SessionClass)
     - serve_forever(poll_interval=0.5)
     - close()
-    - send_packages_to(packages: Iterable[bytes], target_pub_key: Key
-                       ) -> dict[BaseSession, last_seq: int]
-    - sendto(package: bytes, target_pub_key: Key
+    - sendto(data: bytes | Iterable[bytes], target_pub_key: Key
              ) -> dict[BaseSession, last_seq: int]
 
     Instance variables:
@@ -189,20 +186,15 @@ class Node(udpnode.Node):
             Key, dict[Address, SessionClass]] = defaultdict(dict)
         super().__init__(server_address, SessionClass, bind_and_activate)
 
-    def send_packages_to(self, packages: Iterable[bytes],
-                         target_pub_key: Key) -> dict[BaseSession, int]:
-        """Send packages to target nodes."""
+    def sendto(self, data: bytes | Iterable[bytes],
+               target_pub_key: Key) -> dict[BaseSession, int]:
+        """Send package or packages to target nodes."""
         with self.group_lock:
             cons = self.session_groups.get(target_pub_key)
             if cons is None:
                 return None
             cons = list(cons.values())
-        return {con: con.send_packages(packages) for con in cons}
-
-    def sendto(self, package: bytes,
-               target_pub_key: Key) -> dict[BaseSession, int]:
-        """Send package to target nodes."""
-        return self.send_packages_to((package,), target_pub_key)
+        return {con: con.send(data) for con in cons}
 
     get_sign = staticmethod(get_sign)
     get_verify = staticmethod(get_verify)

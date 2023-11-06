@@ -11,7 +11,7 @@ Multi-threading utilities.
 
 from functools import wraps
 from queue import Queue
-from typing import Callable, ParamSpec
+from typing import Callable
 from threading import _RLock
 
 
@@ -26,12 +26,9 @@ def call_forever(queue: Queue):
         func(*args, **kwargs)
 
 
-_P = ParamSpec('_P')
-
-
 def in_queue(queue: Queue | str) -> Callable[[Callable], None]:
     """Put function and arguments in queue."""
-    def in_queue_(func: Callable) -> Callable[[_P], None]:
+    def in_queue_[**P](func: Callable) -> Callable[[P], None]:
         """Function and its arguments will be put in queue.
 
         If queue is instance of str,
@@ -43,7 +40,7 @@ def in_queue(queue: Queue | str) -> Callable[[Callable], None]:
             self = None
 
             @wraps(func)
-            def decorated(*args: _P.args, **kwargs: _P.kwargs) -> None:
+            def decorated(*args: P.args, **kwargs: P.kwargs) -> None:
                 """Method called in another thread."""
                 nonlocal attrs, queue, self
                 if self is not args[0]:
@@ -53,7 +50,7 @@ def in_queue(queue: Queue | str) -> Callable[[Callable], None]:
                 queue.put((func, args, kwargs))
         else:
             @wraps(func)
-            def decorated(*args: _P.args, **kwargs: _P.kwargs) -> None:
+            def decorated(*args: P.args, **kwargs: P.kwargs) -> None:
                 """Function called in another thread."""
                 queue.put((func, args, kwargs))
         return decorated

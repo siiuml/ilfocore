@@ -51,8 +51,7 @@ class Connection(metaclass=ABCMeta):
     - __init__(address: Address, node: Node)
     - process(buf: BytesIO)
     - retransmit(now : int)
-    - send(package: bytes) -> last_seq
-    - send_packages(packages: Iterable[bytes]) -> last_seq
+    - send(data: bytes | Iterable[bytes]) -> last_seq
 
     Methods that may be overridden:
 
@@ -793,7 +792,7 @@ class ConnectionToClient(HalfConnection):
         # Send package without cipher
         kdf_alg = bytes(kdf_alg, ENCODING)
         cipher_alg = bytes(cipher_alg, ENCODING)
-        self.send_packages((kdf_alg, cipher_alg, send_key))
+        self.send((kdf_alg, cipher_alg, send_key))
         self.cipher_key = cipher_key
 
     def handle_mac(self, buf: BufferedReader):
@@ -985,7 +984,7 @@ class ConnectionToServer(HalfConnection):
         self._send_pkts.clear()
         alg = bytes(alg, ENCODING)
         # Send packages
-        self.send_packages((alg, send_key))
+        self.send((alg, send_key))
 
     def handle_asym(self, buf: BufferedReader):
         """Handle asymmetric key for key exchange."""
@@ -1012,7 +1011,7 @@ class ConnectionToServer(HalfConnection):
     def send_mac(self):
         """Send key for message authentication.
 
-        packages == (alg, key)  # key will be encrypted in send_packages()
+        packages == (alg, key)  # key will be encrypted in send()
 
         """
         # Algorithm
@@ -1020,7 +1019,7 @@ class ConnectionToServer(HalfConnection):
         self._temp_key = self.get_mac(alg).generate()
         alg = bytes(alg, ENCODING)
         # Send package
-        self._mac_seq = self.send_packages((alg, self._temp_key.to_bytes()))
+        self._mac_seq = self.send((alg, self._temp_key.to_bytes()))
         self.acknowledged = self.acknowledged_mac
 
     def acknowledged_mac(self, seq: int):
@@ -1058,8 +1057,7 @@ class BaseSession(Connection):
     - finish()
     - stop()
     - close()
-    - send(package: bytes) -> last_seq
-    - send_packages(packages: Iterable[bytes]) -> last_seq
+    - send(data: bytes | Iterable[bytes]) -> last_seq
 
     Methods that should be overriden:
     - handle(data: bytes)
