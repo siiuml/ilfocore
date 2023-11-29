@@ -12,13 +12,15 @@ Ilfocore utilities.
 from io import BufferedIOBase
 from math import ceil
 
+NULL = b'\xff'
+
 do_nothing = lambda *args, **kwargs: None
 
 
 def pack_integral(num: int | None, byteorder='big') -> bytes:
     """Pack an integral into bytes."""
     if num is None:
-        return b'\xff'
+        return NULL
     if num < 0b10000000:
         return num.to_bytes()
     return (((size := ceil(num.bit_length() / 8)) + 0b10000000).to_bytes()
@@ -52,7 +54,7 @@ def read_integral(buf: BufferedIOBase, byteorder='big', *, not_none=True
 def pack_with_size(data: bytes | None, byteorder='big') -> bytes:
     """Pack data with its size."""
     if data is None:
-        return b'\xff'
+        return NULL
     return pack_integral(len(data), byteorder) + data
 
 
@@ -69,7 +71,7 @@ def write_with_size(data: bytes | None, buf: BufferedIOBase, byteorder='big'
 def read_by_size(buf: BufferedIOBase, byteorder='big', *, not_none=True
                  ) -> bytes | None:
     """Read data from buffer by its size indicated in the buffer."""
-    size = read_integral(buf, byteorder)
+    size = read_integral(buf, byteorder, not_none=not_none)
     if not_none or size is not None:
         return buf.read(size)
     return None

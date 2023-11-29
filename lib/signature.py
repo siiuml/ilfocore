@@ -35,7 +35,7 @@ from cryptography.hazmat.primitives.serialization import (
     load_der_public_key
 )
 
-# from .exceptions import AlgorithmError
+from .exceptions import AlgorithmError
 
 
 class SignatureKey(ABC):

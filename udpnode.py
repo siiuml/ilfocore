@@ -505,6 +505,9 @@ class Connection(metaclass=ABCMeta):
         self._retries += 1
         self.update_deadline()
 
+    def __repr__(self) -> str:
+        return f"Connection to {self.address}"
+
 
 class HalfConnection(Connection):
 

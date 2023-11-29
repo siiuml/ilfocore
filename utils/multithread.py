@@ -9,9 +9,10 @@ Multi-threading utilities.
 
 """
 
+from collections.abc import Callable
 from functools import wraps
 from queue import Queue
-from typing import Callable
+from typing import Any
 from threading import _RLock
 
 
@@ -26,9 +27,10 @@ def call_forever(queue: Queue):
         func(*args, **kwargs)
 
 
-def in_queue(queue: Queue | str) -> Callable[[Callable], None]:
+def in_queue(queue: Queue | str) -> Callable[
+        [Callable[..., Any]], Callable[..., None]]:
     """Put function and arguments in queue."""
-    def in_queue_[**P](func: Callable) -> Callable[[P], None]:
+    def in_queue_[**P](func: Callable[P, Any]) -> Callable[P, None]:
         """Function and its arguments will be put in queue.
 
         If queue is instance of str,
