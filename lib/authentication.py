@@ -51,7 +51,7 @@ class Digest(metaclass=ABCMeta):
 
 class NoDigest(Digest):
 
-    """No MAC."""
+    """Digest into nothing."""
 
     name = 'none'
     digest_size = 0
@@ -113,7 +113,28 @@ class MACKey(Digest):
     @classmethod
     @abstractmethod
     def from_bytes(cls, key_bytes: bytes) -> Self:
-        """Load key from bytes."""
+        """Generate a new object."""
+
+
+class NoMac(MACKey, NoDigest):
+
+    """No MAC."""
+
+    def __init__(self, key=None):
+        super().__init__(key)
+
+    def digest(self, data: bytes) -> bytes:
+        """Return empty bytes."""
+        return b''
+
+    def to_bytes(self) -> bytes:
+        """Return an empty key in bytes."""
+        return b''
+
+    @classmethod
+    def from_bytes(cls, key_bytes: bytes) -> Self:
+        """Geb."""
+        return cls()
 
 
 class HMACKey(MACKey):
@@ -147,7 +168,7 @@ class HMACMetaclass(ABCMeta):
         super().__init__(name, bases, attrs)
 
 
-mac_algorithms = {}
+mac_algorithms = {'none': NoMac}
 
 for __name in _hash_algorithms:
     __alg = __name.lower()

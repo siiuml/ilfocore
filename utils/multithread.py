@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023 SiumLhahah
+# Copyright (c) 2022-2024 SiumLhahah
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 

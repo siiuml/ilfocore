@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023 SiumLhahah
+# Copyright (c) 2022-2024 SiumLhahah
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -12,7 +12,7 @@ Ilfocore utilities.
 from io import BufferedIOBase
 from math import ceil
 
-NULL = b'\xff'
+NULL = 0b11111111.to_bytes()
 
 do_nothing = lambda *args, **kwargs: None
 
@@ -44,10 +44,10 @@ def read_integral(buf: BufferedIOBase, byteorder='big', *, not_none=True
         size = size_bytes[0]
     else:
         raise ValueError
-    if size < 0x80:
+    if size < 0b10000000:
         return size
-    if not_none or size < 0xff:
-        return int.from_bytes(buf.read(size - 128), byteorder)
+    if not_none or size < 0b11111111:
+        return int.from_bytes(buf.read(size - 0b10000000), byteorder)
     return None
 
 

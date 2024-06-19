@@ -1,5 +1,3 @@
-**This README file and the comments in python files are not yet completed.**
-
 The ilfocore package
 ===================
 
@@ -28,6 +26,10 @@ from ilfocore import signature
 from ilfocore.constants import Address
 from ilfocore.ilfonode import BaseSession, Node
 
+# May use IPv6
+# import socket
+# Node.address_family = socket.AF_INET6
+
 
 class MySession(BaseSession):
     def setup_common(self):
@@ -45,8 +47,8 @@ if __name__ == "__main__":
     key1 = signature.get_sign(alg).generate()
     key2 = signature.get_sign(alg).generate()
     # Initialize nodes
-    addr1 = Address('127.0.0.1', 9999)
-    addr2 = Address('127.0.0.1', 9998)
+    addr1 = Address('localhost', 9999)
+    addr2 = Address('localhost', 9998)
     node1 = Node(key1, addr1, MySession)
     node2 = Node(key2, addr2, MySession)
     # Start threads

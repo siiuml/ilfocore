@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2023 SiumLhahah
+# Copyright (c) 2022-2024 SiumLhahah
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -11,16 +11,18 @@ Node based on UDP.
 
 from abc import ABCMeta, abstractmethod
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from hmac import compare_digest
 from io import BufferedReader, BytesIO
 from queue import Queue
 from secrets import randbelow, token_bytes
+from socket import SOCK_DGRAM, getaddrinfo
 from socketserver import UDPServer
 from threading import RLock, Thread
 from time import monotonic as time
 from types import MethodType
 from typing import Self
+
 from .constants import (
     BYTEORDER,
     ENCODING,
@@ -62,73 +64,73 @@ class Connection(metaclass=ABCMeta):
     - close()
     - update_deadline()
 
-    Class variables:
-
-    - multithreaded : bool
-
-    Instance variables:
-
-    - self.address : Address
-    - self.node : Node
-    - self._send_pkts : list[bytes]
-    - self._deadline : float
-    - self._retries : int
-    - self._recv_pkts: list[BytesIO]
-    - self._recv_buf : BytesIO
-    - self.__not_packing : bool
-    - self.__size_left : int
-    - self.is_finished : bool
-    - self._send_lock : RLock
-
-    - self.version: bytes
-    - self.max_packet_size : int
-
-    - self.conn_id_size : int
-    - self.recv_conn_id : bytes
-    - self.send_conn_id : bytes
-
-    - self.send_seq_size : int
-    - self._send_seq : int
-    - self._max_seq_number : int
-    - self._recv_seq_size : int
-    - self._recv_seq : int
-
-    - self.mac_key : authentication.Digest
-    - self.digest_key : authentication.Digest
-    - self.asym_keys : tuple[asymmetric.AsymmetricSecret, bytes, bytes]
-    - self.kdf : kdf.KDF
-    - self.cipher_key : cipher.SymmetricKey
-
     """
 
-    multithreaded = False
+    # Class variables:
+    multithreaded = False   # If multithread to process requests
+
+    # Instance variables:
+    # Basic connection properties
+    address: Address   # Target address
+    node: 'Node'       # Node reflection.
+
+    # For sending
+    _send_pkts: list[bytes]    # Datagram packets for retransmission
+    _deadline: float           # Deadline to retransmit datagram packet
+    _retries: int              # Retransmission times counting
+    # For receiving
+    _recv_pkts: list[BytesIO]   # Datagram packets received but not parsed
+
+    # For parsing
+    _recv_buf: BytesIO     # Buffer for packing node packages
+    __not_packing: bool    # If not packing a node package
+    __size_left: int       # The size of the rest of a node package
+    is_finished: bool      # If the connection is finished
+    # then it won't handle any packages
+
+    # Multi-threading
+    _send_lock: RLock          # Lock of sending process
+    _queue: Queue[bytes | None]  # Queue of requests to handle
+
+    # Basic connection information
+    version: bytes          # Protocol version of target node
+    max_packet_size: int   # Maximum available size for a node packet to send
+    # max_packet_size ==
+    # max_udp_packet_size - TYPE_SIZE - _recv_seq_size - mac_key.digest_size
+    conn_id_size: int      # Size of connection ID
+    recv_conn_id: bytes    # Connection ID received
+    send_conn_id: bytes    # Connection ID sent
+
+    # Basic transmissino information
+    send_seq_size: int     # Byte length of sequence numbers sending
+    _send_seq: int
+    _max_seq_number: int
+    _recv_seq_size: int
+    _recv_seq: int
+
+    # Security
+    mac_key: authentication.Digest     # Message authenticator
+    digest_key: authentication.Digest  # Temporary message authenticator
+    asym_keys: tuple[asymmetric.AsymmetricSecret, bytes, bytes]
+    # Secret key, public key sent and public key received
+    kdf: kdf.KDF                       # Key derivation function
+    cipher_key: cipher.SymmetricKey    # Symmetric encryptor
 
     def __init__(self, address: Address, node: 'Node'):
         self.address = address
         self.node = node
 
-        # For sending
-        # Datagram packets for retransmission
-        self._send_pkts: list[bytes] = []
-        # Deadline to retransmit datagram packet
-        self._deadline: float = 0
-        # Retransmission times counting
+        self._send_pkts = []
+        self._deadline = 0
         self._retries = 0
 
-        # For receiving
-        # Datagram packets received but not parsed
-        self._recv_pkts: list[BytesIO] = []
-        # For parsing
-        # Buffer for packing node packages
+        self._recv_pkts = []
+
         self._recv_buf = BytesIO()
-        # If not packing a node package
         self.__not_packing = True
-        # The size of the rest of a node package
         self.__size_left = 0
-        # If the connection is finished, then it won't handle any packages
         self.is_finished = False
 
-        # Lock
         self._send_lock = RLock()
 
     def start(self):
@@ -242,6 +244,7 @@ class Connection(metaclass=ABCMeta):
                 written = recv_buf.write(size)
                 if written >= size_len:
                     # Got all bytes in need
+                    recv_buf.seek(0)
                     self.__size_left = int.from_bytes(
                         recv_buf.read(), BYTEORDER)
                     # Start to pack the package
@@ -265,13 +268,17 @@ class Connection(metaclass=ABCMeta):
             # Return the full package buffer
             recv_buf.seek(0)
             return BufferedReader(recv_buf)
+        return None
 
     def verify_mac(self, buf: BytesIO) -> bool:
         """Verify MAC."""
         req = buf.getvalue()
-        index = -self.mac_key.digest_size
-        msg, mac = req[:index], req[index:]
-        buf.truncate(len(msg))
+        if dig_size := self.mac_key.digest_size:
+            index = -dig_size
+            msg, mac = req[:index], req[index:]
+            buf.truncate(len(msg))
+        else:
+            msg, mac = req, b''
         return compare_digest(mac, self.mac_key.digest(msg))
 
     def acknowledge(self):
@@ -468,8 +475,8 @@ class Connection(metaclass=ABCMeta):
                     return
                 pkt_buf.write(seq_bytes)
                 pkt_buf.write(data)
-                pkt_buf.write(mac_key.digest(pkt_buf.getvalue()))
                 pkt_buf.truncate()
+                pkt_buf.write(mac_key.digest(pkt_buf.getvalue()))
                 self._send_pkts.append(data := pkt_buf.getvalue())
                 self.node.socket.sendto(data, self.address)
         self.update_deadline()
@@ -516,23 +523,28 @@ class HalfConnection(Connection):
     multithreaded = True
     send_seq_size = 4
 
+    _alg_buf: deque[str]
+    _session: 'BaseSession'
+
     def __init__(self, address, node):
         super().__init__(address, node)
         self._max_seq_number = 1 << self.send_seq_size * 8
         self._send_seq = self.get_init_seq(self._max_seq_number)
-        self._recv_size: int = None
-        self._recv_seq: int = None
+        self._recv_size = None
+        self._recv_seq = None
         self._recv_pkts = []
-        self.recv_conn_id: bytes = None
-        self.max_packet_size: int = None
+        self.version = None
+        self.recv_conn_id = None
+        self.max_packet_size = None
         self.mac_key = authentication.NoDigest.generate()
-        self.digest_key: authentication.Digest = None
-        self.asym_keys: tuple[
-            asymmetric.AsymmetricSecret, bytes, bytes] = None
-        self.kdf: kdf.KDF = None
+        self.digest_key = None
+        self.asym_keys = None
+        self.kdf = None
         self.cipher_key = cipher.NoCipher.generate()
-        self._alg_buf: deque[str] = deque()
-        self._session: BaseSession = None
+
+        self._handlers: deque[Callable[[BufferedReader], None]]
+        self._alg_buf = deque()
+        self._session = None
 
     @property
     def recv_seq_size(self) -> int:
@@ -653,7 +665,7 @@ class ConnectionToClient(HalfConnection):
         self._handlers = deque([self.handle_asym,
                                 self.handle_mac])
         if self.multithreaded:
-            self._queue: Queue[bytes | None] = node.client_request_queue
+            self._queue = node.client_request_queue
 
     def process_init(self, buf: BytesIO):
         """Process initial message."""
@@ -831,17 +843,19 @@ class ConnectionToServer(HalfConnection):
     """Unestablished session to server node."""
 
     conn_id_size = 16
+    _temp_key: authentication.MACKey
+    _mac_seq: int
 
     def __init__(self, address, node):
         super().__init__(address, node)
         self.send_conn_id = ((self.conn_id_size - 1).to_bytes() +
                              self.random_bytes(self.conn_id_size - 1))
-        self._temp_key: authentication.MACKey = None
-        self._mac_seq: int = None
+        self._temp_key = None
+        self._mac_seq = None
         self._handlers = deque([self.handle_alg,
                                 self.handle_asym])
         if self.multithreaded:
-            self._queue: Queue[bytes | None] = node.server_request_queue
+            self._queue = node.server_request_queue
 
     @in_queue
     def setup(self):
@@ -1080,42 +1094,6 @@ class BaseSession(Connection):
     - process_capture(req_type: bytes, buf: BytesIO)
     - process_request(req_type: bytes, buf: BytesIO)
 
-    Class variables:
-    - multithreaded : bool
-        If multithread to process requests.
-
-    Instance variables:
-
-    - address : Address
-        Target address.
-    - node : Node
-        Node reflection.
-
-    - version : bytes
-        Protocol version of target node.
-    - recv_conn_id : bytes
-        Session ID received.
-    - send_conn_id : bytes
-        Session ID sent.
-    - max_packet_size : int
-        max_packet_size == (max_udp_packet_size - TYPE_SIZE
-           - self._recv_seq_size - self.mac_key.digest_size)
-        Maximum available size for a node packet to send.
-    - send_seq_size : int
-        Byte length of sequence numbers sending.
-
-    - asym_keys : tuple[asymmetric.AsymmetricSecret, bytes, bytes]
-        Secret key, public key sent and public key received.
-    - cipher_key : cipher.SymmetricKey
-        Symmetric encryptor.
-    - digest_key : authentication.MACKey
-        Message authenticator not used.
-    - mac_key : authentication.MACKey
-        Message authenticator.
-
-    - _queue : Queue
-        Queue of requests to process.
-
     """
 
     multithreaded = True
@@ -1127,26 +1105,26 @@ class BaseSession(Connection):
 
         """
         super().__init__(conn.address, conn.node)
-        # Session info
+
         self.version = conn.version
         self.conn_id_size = conn.conn_id_size
         self.recv_conn_id = conn.recv_conn_id
         self.send_conn_id = conn.send_conn_id
-        # Transmission
+
         self.max_packet_size = conn.max_packet_size
         self._recv_seq_size = conn._recv_seq_size
         self._recv_seq = conn._recv_seq
         self.send_seq_size = conn.send_seq_size
         self._max_seq_number = conn.max_seq_number
         self._send_seq = conn.send_seq
-        # Security
+
         self.asym_keys = conn.asym_keys
         self.cipher_key = conn.cipher_key
         self.digest_key = conn.digest_key
         self.mac_key = conn.mac_key
-        # Multi-threading
+
         if self.multithreaded:
-            self._queue: Queue[bytes | None] = Queue()
+            self._queue = Queue()
             self.thread = Thread(target=call_forever,
                                  args=(self._queue,))
 
@@ -1202,52 +1180,8 @@ class Node(UDPServer):
     - close_request(request)
     - handle_error()
 
-    Class variables:
-    - version : bytes
-    - max_packet_size : int
-    - ClientClass = ConnectionToClient
-    - ServerClass = ConnectionToServer
-    - has_thread_as_client : bool
-    - has_thread_as_server : bool
-    - keepalive_interval : float
-    - keepalive_timeout : float
-    - timeout : float
-    - retries : int
-    - digest_alg : str
-    - key_exchange_alg : str
-    - cipher_alg : str
-    - mac_alg : str
-    - kdf_alg : str
-
-    Instance variables:
-
-    - sessions : dict[Address, BaseSession]
-        Information of established sessions.
-    - clients : dict[Address, ConnectionToClient]
-        Information of connections,
-        target nodes as clients, self as server.
-    - servers : dict[Address, ConnectionToServer]
-        Information of connections,
-        target nodes as servers, self as client.
-
-    - dead_cons : set[Connection]
-        Dead connections not having sent any message.
-    - retrans_cons: set[Connection]
-        Connections that need retransmission.
-
-    - group_lock : RLock
-        To lock groups, such as sessions and dead_cons.
-
-    - __keepalive_send_time : float
-        Time to send keepalive packets.
-    - __keepalive_deadline : float
-        Deadline for others to send keepalive packest.
-
-    - client_request_queue : Queue[tuple[bytes, ConnectionToClient]]
-    - server_request_queue : Queue[tuple[bytes, ConnectionToServer]]
-    - threads : list[threading.Threads]
-
     """
+    # Class variables:
     # Infomation in connection
     version = b'node2'  # version of protocol, for others to identify it
     max_packet_size = 512
@@ -1270,6 +1204,28 @@ class Node(UDPServer):
     mac_alg = 'hmac-sha256'
     kdf_alg = 'hkdf_extract-md5'
 
+    # Instance variables:
+    # All connections
+    sessions: dict[Address, BaseSession]        # Established sessions
+    clients: dict[Address, ConnectionToClient]  # target nodes as clients
+    # while self as server
+    servers: dict[Address, ConnectionToClient]  # target nodes as servers
+    # while self as client
+
+    # Marked connections
+    retrans_cons: set[Connection]   # Dead connections having sent no data
+    dead_cons: set[Connection]      # Connections that need retransmission
+
+    # Keepalive
+    __keepalive_send_time: float   # Time to send keepalive packets
+    __keepalive_deadline: float    # Deadline for others to send data
+
+    # Multi-threading
+    client_request_queue: Queue[tuple[bytes, ConnectionToClient] | None]
+    server_request_queue: Queue[tuple[bytes, ConnectionToServer] | None]
+    threads: list[Thread]
+    group_lock: RLock  # To lock groups, such as sessions and dead_cons
+
     def __init__(
         self,
         server_address: Address,
@@ -1278,31 +1234,26 @@ class Node(UDPServer):
     ):
 
         self.SessionClass = SessionClass
-        self.sessions: dict[Address, BaseSession] = {}
-        self.clients: dict[Address, ConnectionToClient] = {}
-        self.servers: dict[Address, ConnectionToServer] = {}
-        self.retrans_cons: set[Connection] = set()
-        self.dead_cons: set[Connection] = set()
+        self.sessions = {}
+        self.clients = {}
+        self.servers = {}
+        self.retrans_cons = set()
+        self.dead_cons = set()
         self.group_lock = RLock()
 
         self.__keepalive_send_time = time() + self.keepalive_interval
         self.__keepalive_deadline = time() + self.keepalive_timeout
 
-        # Multi-thread
         # As client
         if self.has_queue_to_server:
-            self.server_request_queue: Queue[
-                tuple[bytes, ConnectionToServer] | None
-            ] = Queue()
+            self.server_request_queue = queue = Queue()
             self.server_request_thread = Thread(
-                target=call_forever, args=(self.server_request_queue,))
+                target=call_forever, args=(queue,))
         # As server
         if self.has_queue_to_client:
-            self.client_request_queue: Queue[
-                tuple[bytes, ConnectionToClient] | None
-            ] = Queue()
+            self.client_request_queue = queue = Queue()
             self.client_request_thread = Thread(
-                target=call_forever, args=(self.client_request_queue,))
+                target=call_forever, args=(queue,))
 
         super().__init__(server_address, SessionClass, bind_and_activate)
 
@@ -1348,7 +1299,7 @@ class Node(UDPServer):
         """Process one request."""
         buf = BytesIO(request)
         with self.group_lock:
-            for group in (self.sessions, self.servers, self.clients):
+            for group in self.sessions, self.servers, self.clients:
                 if con := group.get(target_address):
                     if con in self.dead_cons:
                         # Connection alive
@@ -1362,11 +1313,15 @@ class Node(UDPServer):
 
     def connect(self, address: Address) -> ConnectionToClient:
         """New connection to server."""
-        conn = self.ServerClass(address, self)
-        with self.group_lock:
-            self.servers[address] = conn
-        conn.start()
-        return conn
+        for _, _, _, _, addr in getaddrinfo(
+                *address, family=self.address_family, type=SOCK_DGRAM):
+            if len(addr) > 2:
+                addr = addr[:2]
+            conn = self.ServerClass(addr, self)
+            with self.group_lock:
+                self.servers[addr] = conn
+            conn.start()
+            return conn
 
     def establish_conn_to_client(
             self, buf: BytesIO, addr: Address) -> ConnectionToClient:
@@ -1403,10 +1358,12 @@ class Node(UDPServer):
         for cls, group in ((self.SessionClass, self.sessions),
                            (self.ServerClass, self.servers),
                            (self.ClientClass, self.clients)):
-            if cls.multithreaded:
-                for con in group.values():
-                    con.finish()
-                    con.stop()
+            with self.group_lock:
+                if cls.multithreaded:
+                    for con in group.values():
+                        con.finish()
+                        con.stop()
+                group.clear()
 
     def handle_request(self, *args):
         """Use module self.SessionClass.handle instead."""
