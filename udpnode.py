@@ -1311,17 +1311,18 @@ class Node(UDPServer):
                 # New connection
                 self.establish_conn_to_client(buf, target_address)
 
-    def connect(self, address: Address) -> ConnectionToClient:
+    def connect(self, address: Address) -> list[ConnectionToClient]:
         """New connection to server."""
+        conns = []
         for _, _, _, _, addr in getaddrinfo(
                 *address, family=self.address_family, type=SOCK_DGRAM):
             if len(addr) > 2:
                 addr = addr[:2]
-            conn = self.ServerClass(addr, self)
+            conns.append(conn := self.ServerClass(addr, self))
             with self.group_lock:
                 self.servers[addr] = conn
             conn.start()
-            return conn
+        return conns
 
     def establish_conn_to_client(
             self, buf: BytesIO, addr: Address) -> ConnectionToClient:
