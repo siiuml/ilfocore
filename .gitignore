@@ -1,6 +1,9 @@
-# Compiled
+/dist/
+
+/ilfocore.egg-info/
+
+.ipynb_checkpoints/
+
 __pycache__/
 
-# Spyder
 .spyproject/
-

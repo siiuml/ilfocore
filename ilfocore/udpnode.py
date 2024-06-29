@@ -74,6 +74,8 @@ class Connection(metaclass=ABCMeta):
     address: Address   # Target address
     node: 'Node'       # Node reflection.
 
+    data: object       # Stable data of unestablished connections to server
+
     # For sending
     _send_pkts: list[bytes]    # Datagram packets for retransmission
     _deadline: float           # Deadline to retransmit datagram packet
@@ -116,9 +118,10 @@ class Connection(metaclass=ABCMeta):
     kdf: kdf.KDF                       # Key derivation function
     cipher_key: cipher.SymmetricKey    # Symmetric encryptor
 
-    def __init__(self, address: Address, node: 'Node'):
+    def __init__(self, address: Address, node: 'Node', data=None):
         self.address = address
         self.node = node
+        self.data = data
 
         self._send_pkts = []
         self._deadline = 0
@@ -132,6 +135,12 @@ class Connection(metaclass=ABCMeta):
         self.is_finished = False
 
         self._send_lock = RLock()
+
+    @classmethod
+    def from_connection(cls, conn: Self) -> Self:
+        """Establish a connection from another one."""
+        self = cls(conn.address, conn.node, conn.data)
+        return self
 
     def start(self):
         """Call setup().
@@ -523,11 +532,12 @@ class HalfConnection(Connection):
     multithreaded = True
     send_seq_size = 4
 
+    _handlers: deque[Callable[[BufferedReader], None]]
     _alg_buf: deque[str]
     _session: 'BaseSession'
 
-    def __init__(self, address, node):
-        super().__init__(address, node)
+    def __init__(self, address, node, data=None):
+        super().__init__(address, node, data)
         self._max_seq_number = 1 << self.send_seq_size * 8
         self._send_seq = self.get_init_seq(self._max_seq_number)
         self._recv_size = None
@@ -542,7 +552,6 @@ class HalfConnection(Connection):
         self.kdf = None
         self.cipher_key = cipher.NoCipher.generate()
 
-        self._handlers: deque[Callable[[BufferedReader], None]]
         self._alg_buf = deque()
         self._session = None
 
@@ -658,8 +667,8 @@ class ConnectionToClient(HalfConnection):
 
     """Unestablished session to client node."""
 
-    def __init__(self, address, node):
-        super().__init__(address, node)
+    def __init__(self, address, node, data=None):
+        super().__init__(address, node, data=None)
         self.conn_id_size = 0
         self.send_conn_id = b''
         self._handlers = deque([self.handle_asym,
@@ -846,8 +855,8 @@ class ConnectionToServer(HalfConnection):
     _temp_key: authentication.MACKey
     _mac_seq: int
 
-    def __init__(self, address, node):
-        super().__init__(address, node)
+    def __init__(self, address, node, data=None):
+        super().__init__(address, node, data)
         self.send_conn_id = ((self.conn_id_size - 1).to_bytes() +
                              self.random_bytes(self.conn_id_size - 1))
         self._temp_key = None
@@ -949,7 +958,9 @@ class ConnectionToServer(HalfConnection):
                             send_is_neg or recv_is_less):
                         self.close()
                         buf.seek(TYPE_SIZE)
-                        self.node.establish_conn_to_client(buf, self.address)
+                        conn = self.node.establish_conn_to_client(
+                            buf, self.address)
+                        conn.data = self.data
                 raise ValueError("Invaild request type")
             # Verify MAC
             if not self.verify_mac(buf):
@@ -1104,7 +1115,7 @@ class BaseSession(Connection):
         Establish a session.
 
         """
-        super().__init__(conn.address, conn.node)
+        super().__init__(conn.address, conn.node, conn.data)
 
         self.version = conn.version
         self.conn_id_size = conn.conn_id_size
@@ -1122,6 +1133,8 @@ class BaseSession(Connection):
         self.cipher_key = conn.cipher_key
         self.digest_key = conn.digest_key
         self.mac_key = conn.mac_key
+
+        self.data = conn.data
 
         if self.multithreaded:
             self._queue = Queue()
@@ -1325,11 +1338,15 @@ class Node(UDPServer):
         return conns
 
     def establish_conn_to_client(
-            self, buf: BytesIO, addr: Address) -> ConnectionToClient:
+        self, buf: BytesIO, origin: Address | ConnectionToServer
+    ) -> ConnectionToClient:
         """New connection from client, called by process_request()."""
-        conn = self.ClientClass(addr, self)
+        client_cls = self.ClientClass
+        conn = (client_cls.from_connection(origin)
+                if isinstance(origin, ConnectionToServer)
+                else client_cls(origin, self))
         # Lock acquired by caller process_request()
-        self.clients[addr] = conn
+        self.clients[conn.address] = conn
         conn.start()
         conn.process(buf)
         return conn
@@ -1338,7 +1355,7 @@ class Node(UDPServer):
         """Establish a new session, called by HalfConnection methods."""
         con = self.SessionClass.from_connection(conn)
         with self.group_lock:
-            self.sessions[conn.address] = con
+            self.sessions[con.address] = con
         con.start()
         return con
 
@@ -1366,10 +1383,9 @@ class Node(UDPServer):
                         con.stop()
                 group.clear()
 
-    def handle_request(self, *args):
-        """Use module self.SessionClass.handle instead."""
-        raise
+    def handle_request(self, *args, **kwargs):
+        """Use module ilfocore.udpnode.Node.SessionClass.handle instead."""
+        raise NotImplementedError(
+            "Use module ilfocore.udpnode.Node.SessionClass.handle instead.")
 
-    def finish_request(self, *args):
-        """Use module self.SessionClass.handle instead."""
-        raise
+    finish_request = handle_request

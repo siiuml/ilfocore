@@ -9,7 +9,4 @@ The core of ilafalseone.
 """
 
 __author__ = 'SiumLhahah'
-__version__ = '0.2.10'
-
-from .ilfonode import BaseSession, Node
-from .lib import *
+__version__ = '0.2.11'

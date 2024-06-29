@@ -12,7 +12,7 @@ Safe node of ilfocore, providing authentic transmission support.
 from collections import defaultdict
 from io import BufferedReader, BytesIO
 from typing import Iterable
-from . import udpnode as udpnode
+from . import udpnode
 from .constants import ENCODING, Address, Key
 from .lib.signature import PrivateKey, PublicKey, get_sign, get_verify
 from .utils import write_with_size
