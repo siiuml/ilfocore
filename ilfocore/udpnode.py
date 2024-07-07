@@ -12,6 +12,7 @@ Node based on UDP.
 from abc import ABCMeta, abstractmethod
 from collections import deque
 from collections.abc import Callable, Iterable
+from functools import wraps
 from hmac import compare_digest
 from io import BufferedReader, BytesIO
 from queue import Queue
@@ -40,8 +41,6 @@ from .utils import (
     write_with_size
 )
 from .utils.multithread import call_forever, in_queue
-
-in_queue = in_queue('_queue')
 
 
 class Connection(metaclass=ABCMeta):
@@ -77,9 +76,9 @@ class Connection(metaclass=ABCMeta):
     data: object       # Stable data of unestablished connections to server
 
     # For sending
-    _send_pkts: list[bytes]    # Datagram packets for retransmission
-    _deadline: float           # Deadline to retransmit datagram packet
-    _retries: int              # Retransmission times counting
+    _send_pkts: list[bytes]     # Datagram packets for retransmission
+    _deadline: float            # Deadline to retransmit datagram packet
+    _retries: int               # Retransmission times counting
     # For receiving
     _recv_pkts: list[BytesIO]   # Datagram packets received but not parsed
 
@@ -88,27 +87,27 @@ class Connection(metaclass=ABCMeta):
     __not_packing: bool    # If not packing a node package
     __size_left: int       # The size of the rest of a node package
     is_finished: bool      # If the connection is finished
-    # then it won't handle any packages
+    #                        then it won't handle any packages
 
     # Multi-threading
-    _send_lock: RLock          # Lock of sending process
+    _send_lock: RLock           # Lock of sending process
     _queue: Queue[bytes | None]  # Queue of requests to handle
 
     # Basic connection information
     version: bytes          # Protocol version of target node
-    max_packet_size: int   # Maximum available size for a node packet to send
+    max_packet_size: int    # Maximum available size for a node packet to send
     # max_packet_size ==
     # max_udp_packet_size - TYPE_SIZE - _recv_seq_size - mac_key.digest_size
-    conn_id_size: int      # Size of connection ID
-    recv_conn_id: bytes    # Connection ID received
-    send_conn_id: bytes    # Connection ID sent
+    conn_id_size: int       # Size of connection ID
+    recv_conn_id: bytes     # Connection ID received
+    send_conn_id: bytes     # Connection ID sent
 
     # Basic transmissino information
-    send_seq_size: int     # Byte length of sequence numbers sending
-    _send_seq: int
+    send_seq_size: int      # Byte length of sequence numbers sending
+    _send_seq: int          # Sequnce number of _send_pkts[0]
     _max_seq_number: int
     _recv_seq_size: int
-    _recv_seq: int
+    _recv_seq: int          # Sequnce number of _recv_pkts[0]
 
     # Security
     mac_key: authentication.Digest     # Message authenticator
@@ -371,8 +370,9 @@ class Connection(metaclass=ABCMeta):
                 self._send_seq = next_seq
                 del pkts[: index]
                 # Reset deadline
+                self._retries = 0
                 self.update_deadline()
-                if not self._send_pkts:
+                if not pkts:
                     with self.node.group_lock:
                         if self in self.node.retrans_cons:
                             self.node.retrans_cons.remove(self)
@@ -443,6 +443,9 @@ class Connection(metaclass=ABCMeta):
 
     def process(self, buf: BytesIO):
         """Read the request type."""
+        if self.is_finished:
+            # Do not process request
+            return
         self.process_request(buf.read(TYPE_SIZE), buf)
 
     def send(self, data: bytes | Iterable[bytes]) -> int:
@@ -509,17 +512,21 @@ class Connection(metaclass=ABCMeta):
         If self._retries == self.node.retries,
         then close the connection.
 
+        Return the number of retransmitted packets.
+
         """
         if now < self._deadline or not self._send_pkts:
-            return
+            return 0
         if self._retries >= self.node.retries:
             self.close()
-            return
+            return 0
         with self._send_lock:
-            for data in self._send_pkts:
+            cnt = len(pkts := self._send_pkts)
+            for data in pkts:
                 self.node.socket.sendto(data, self.address)
         self._retries += 1
         self.update_deadline()
+        return cnt
 
     def __repr__(self) -> str:
         return f"Connection to {self.address}"
@@ -583,8 +590,6 @@ class HalfConnection(Connection):
         """
         self.handle = self.handle_alg
 
-    retransmit = in_queue(Connection.retransmit)
-
     def finish(self):
         """Do nothing if the first message have not been accepted."""
         self.is_finished = True
@@ -606,11 +611,6 @@ class HalfConnection(Connection):
             self.close()
             return
         self.handle = self._handlers.popleft()
-
-    def handle_in_session(self, buf: BufferedReader):
-        """Handle package in session."""
-        if self._session is not None:
-            self._session.handle(buf)
 
     @staticmethod
     def get_init_seq(max_seq_number: int) -> int:
@@ -674,17 +674,19 @@ class ConnectionToClient(HalfConnection):
         self._handlers = deque([self.handle_asym,
                                 self.handle_mac])
         if self.multithreaded:
-            self._queue = node.client_request_queue
+            self._queue = queue = node.client_request_queue
+            in_my_queue = in_queue(queue)
+            self.retransmit = in_my_queue(self.retransmit)
+            self.process_hello = in_my_queue(self.process_hello)
 
     def process_init(self, buf: BytesIO):
         """Process initial message."""
         self.process_syn = do_nothing
-        self.process = MethodType(in_queue(Connection.process), self)
+        self.process = in_queue(self._queue)(super().process)
         self.process_hello(buf)
 
     process = process_init
 
-    @in_queue
     def process_hello(self, buf: BytesIO):
         """Process SYN message.
 
@@ -821,7 +823,7 @@ class ConnectionToClient(HalfConnection):
 
     def handle_mac(self, buf: BufferedReader):
         """Handle key for message authentication."""
-        self.handle = self.handle_in_session
+        self.handle = do_nothing
         key = buf.read()
         try:
             self.mac_key = self.get_mac(
@@ -835,8 +837,8 @@ class ConnectionToClient(HalfConnection):
 
         # Establish the session
         self._session = self.node.establish_session(self)
-        # Close but not finish the connection
-        self.finish = do_nothing
+        # Close but do not send EOT message
+        self.finish = super().finish
         self.close()
 
     def close(self):
@@ -864,9 +866,12 @@ class ConnectionToServer(HalfConnection):
         self._handlers = deque([self.handle_alg,
                                 self.handle_asym])
         if self.multithreaded:
-            self._queue = node.server_request_queue
+            self._queue = queue = node.server_request_queue
+            in_my_queue = in_queue(queue)
+            self.retransmit = in_my_queue(self.retransmit)
+            self.setup = in_my_queue(self.setup)
+            self.process_hello = in_my_queue(self.process_hello)
 
-    @in_queue
     def setup(self):
         """Send SYN message at first to start the connection.
 
@@ -916,12 +921,11 @@ class ConnectionToServer(HalfConnection):
     def process_init(self, buf: BytesIO):
         """Process initial message."""
         self.process_ack = do_nothing
-        self.process = MethodType(in_queue(Connection.process), self)
+        self.process = in_queue(self._queue)(super().process)
         self.process_hello(buf)
 
     process = process_init
 
-    @in_queue
     def process_hello(self, buf: BytesIO):
         """Process ACK message.
 
@@ -1016,7 +1020,7 @@ class ConnectionToServer(HalfConnection):
 
     def handle_asym(self, buf: BufferedReader):
         """Handle asymmetric key for key exchange."""
-        self.handle = self.handle_in_session
+        self.handle = do_nothing
         recv_key = buf.read()
         try:
             # Key derivation function
@@ -1060,8 +1064,8 @@ class ConnectionToServer(HalfConnection):
                                      self.mac_key.digest_size)
             # Establish the session
             self._session = self.node.establish_session(self)
-            # Close but not finish the connection
-            self.finish = do_nothing
+            # Close but do not send EOT message
+            self.finish = super().finish
             self.close()
 
     def close(self):
@@ -1109,6 +1113,11 @@ class BaseSession(Connection):
 
     multithreaded = True
 
+    _recv_raw_pkt_cnt: int
+    _was_recving: bool
+
+    _ack_req: bool
+
     def __init__(self, conn: HalfConnection):
         """Constructor.
 
@@ -1137,9 +1146,58 @@ class BaseSession(Connection):
         self.data = conn.data
 
         if self.multithreaded:
-            self._queue = Queue()
-            self.thread = Thread(target=call_forever,
-                                 args=(self._queue,))
+            self._queue = queue = Queue()
+            self.thread = Thread(
+                target=self._sensitive_calling,
+                args=(queue,)
+            )
+            self._recv_raw_pkt_cnt = 0
+            self._was_recving = False
+            self.process = self._get_cnting_process(queue, self.process)
+
+            self._ack_req = False
+        else:
+            self.acknowledge = super().acknowledge
+
+    def _get_cnting_process[**P](
+        self, queue: Queue, process: Callable[P, None]
+    ) -> Callable[P, None]:
+        """Return a process function counting packets it receives."""
+        @wraps(process)
+        def cnting_process_outer(*args: P.args, **kwargs: P.kwargs):
+            @in_queue(self._queue)
+            def cnting_process_inner(*args: P.args, **kwargs: P.kwargs):
+                try:
+                    self._was_recving = True
+                    process(*args, **kwargs)
+                finally:
+                    self._recv_raw_pkt_cnt -= 1
+
+            self._recv_raw_pkt_cnt += 1
+            cnting_process_inner(*args, **kwargs)
+        return cnting_process_outer
+
+    def _sensitive_calling(self, queue):
+        """Call on_quiet()
+        when all packets recently received have been processed."""
+        while (item := queue.get()) is not None:
+            func, args, kwargs = item
+            func(*args, **kwargs)
+            if self._was_recving and not self._recv_raw_pkt_cnt:
+                self._was_recving = False
+                self.on_quiet()
+
+    def on_quiet(self):
+        """Called when all packets recently received have been processed."""
+        if self._ack_req:
+            self._ack_req = False
+            super().acknowledge()
+
+    def acknowledge(self):
+        """Instead of sending ACK instantly,
+        this method requests on_quiet() to send ACK,
+        which can reduce redundant ACKs."""
+        self._ack_req = True
 
     @classmethod
     def from_connection(cls, conn: HalfConnection) -> Self:
@@ -1156,8 +1214,6 @@ class BaseSession(Connection):
             self.thread.start()
         super().start()
 
-    process = in_queue(Connection.process)
-
     def stop(self):
         """Stop the session thread, called by close().
 
@@ -1170,8 +1226,9 @@ class BaseSession(Connection):
     def close(self):
         """Close session, interrupt thread if multi-threaded."""
         with self.node.group_lock:
-            if self.address in self.node.sessions:
-                del self.node.sessions[self.address]
+            addr = self.address
+            if addr in self.node.sessions:
+                del self.node.sessions[addr]
             super().close()
 
 
@@ -1294,8 +1351,9 @@ class Node(UDPServer):
                 self.__keepalive_deadline = time() + self.keepalive_timeout
             # Send keepalive packets
             # To established sessions only
-            for con in self.sessions.values():
-                self.socket.sendto(b'', con.address)
+            with self.group_lock:
+                for con in self.sessions.values():
+                    self.socket.sendto(b'', con.address)
             # Reset time to send keepalive packet
             self.__keepalive_send_time = now + self.keepalive_interval
         with self.group_lock:

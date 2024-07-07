@@ -16,6 +16,7 @@ from . import udpnode
 from .constants import ENCODING, Address, Key
 from .lib.signature import PrivateKey, PublicKey, get_sign, get_verify
 from .utils import write_with_size
+from .utils.multithread import in_queue
 
 
 class BaseSession(udpnode.BaseSession):
@@ -54,8 +55,9 @@ class BaseSession(udpnode.BaseSession):
         self.pub_key: Key = None
         self.sig_key: PublicKey = None
         super().__init__(conn)
+        if self.multithreaded:
+            self.setup = in_queue(self._queue)(self.setup)
 
-    @udpnode.in_queue
     def setup(self):
         """Setup to send signature.
 

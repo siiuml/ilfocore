@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='ilfocore',
-    version='0.2.11',
+    version='0.2.12',
     description="A package provides basic, stable and"
     " authentic transmission support.",
     author='SiumLhahah',
