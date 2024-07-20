@@ -400,7 +400,10 @@ class Connection(metaclass=ABCMeta):
         Overriden by ServerClass.
 
         """
-        if buf.read(self.conn_id_size) != self.recv_conn_id:
+        pos = buf.tell()
+        is_same = buf.read(self.conn_id_size) == self.recv_conn_id
+        buf.seek(pos)
+        if not is_same:
             # New connection
             self.is_finished = True
             self.finish = do_nothing
